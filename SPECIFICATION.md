@@ -542,6 +542,7 @@ ex. 이 값은 HEALTHY지만 이걸 읽었을 때의 시점은 HEALTHY가 아닐
 - `last_server_received_at`
 - `last_reported_mode`
 - `health_status`
+- `telemetry_status`
 - `health_evaluated_at`
 - `last_reading_id`
 
@@ -574,6 +575,21 @@ TODO: observed_applied_at 필드가 있지만 ingest 시점에 어떻게 reconci
 
 - `NORMAL`: 12분 동안 데이터가 없으면 이상
 - `EMERGENCY`: 30초 동안 데이터가 없으면 이상
+
+#### health_status와 telemetry_status의 역할 분리
+
+`health_status`는 센서가 최근까지 정상적으로 데이터를 전송하고 있는지를 나타내는 상태값이다. 이 값은 센서가 보낸 측정 시각이 아니라, 서버가 실제로 데이터를 수신한 시각인 `server_received_at`을 기준으로 계산한다. 따라서 `health_status`는 센서의 통신 생존 여부와 데이터 도착 주기 준수 여부를 판단하는 데 사용한다.
+
+반면 `telemetry_status`는 수신된 데이터 자체의 시간적 품질을 표현하는 보조 상태값이다. 이 값은 `sensor_timestamp`, `server_received_at`, 그리고 해당 센서의 기존 최신 `last_sensor_timestamp`를 함께 고려하여 판단한다. 이를 통해 센서가 살아 있는지 여부와, 도착한 데이터가 신선하고 시간적으로 정상적인지 여부를 분리해서 해석할 수 있다.
+
+`telemetry_status`는 다음 상태를 가질 수 있다.
+
+- `FRESH`: 수신된 데이터가 허용 가능한 지연 범위 내에서 도착했고, 센서 시각도 정상 범위로 판단되는 상태
+- `DELAYED`: 데이터는 수신되었지만 `sensor_timestamp`와 `server_received_at`의 차이가 허용 범위를 초과한 상태. 센서는 살아 있을 수 있으나, 측정값 전달이 늦어졌음을 의미한다.
+- `CLOCK_SKEW`: `sensor_timestamp`가 `server_received_at`보다 비정상적으로 미래이거나 허용 가능한 시계 오차 범위를 벗어난 상태. 센서 내부 시계 또는 timestamp 생성 로직의 이상 가능성을 의미한다.
+- `OUT_OF_ORDER`: 새로 수신된 레코드의 `sensor_timestamp`가 해당 센서에 대해 이미 저장된 최신 `last_sensor_timestamp`보다 과거인 상태. 지연 전송, 재전송, 또는 순서가 뒤섞인 수신 상황을 의미한다.
+
+정리하면 `health_status`는 센서의 통신 생존 상태를 나타내고, `telemetry_status`는 수신 데이터의 시간 품질 상태를 나타낸다.
 
 #### 평가 전략 옵션
 

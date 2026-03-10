@@ -208,8 +208,10 @@ Operator/Frontend
 핵심 설명:
 
 - 이력 조회는 `Sensor Readings Store`가 주 데이터 소스다.
-- 상태 정보는 `Sensor Current Status Store`에서 보강한다.
+- `GET /readings` 응답은 이력 데이터만 반환하고 상태 필드는 포함하지 않는다.
+- 상태 정보는 `Sensor Current Status Store`를 조회하는 `GET /sensors/status`에서만 제공한다.
 - 시간 범위 필터는 정규화된 내부 시각 기준으로 처리한다.
+- 조회 정렬은 `sensor_timestamp DESC, id DESC`를 사용해 pagination 안정성을 보장한다.
 
 #### 3. 센서 상태 평가 흐름
 
@@ -338,13 +340,14 @@ Operator/Frontend
 - `last_server_received_at`
 - `last_reported_mode`
 - `health_status`
+- `telemetry_status`
 - `health_evaluated_at`
 - `last_reading_id`
 
 역할:
 
 - 상태 API의 주 데이터 소스
-- 조회 응답에 `status`를 빠르게 보강
+- 센서 통신 상태와 텔레메트리 품질 상태를 함께 제공
 - 스케줄러가 갱신 대상으로 활용
 
 #### 3. Mode Change Request Store
@@ -366,6 +369,7 @@ Operator/Frontend
 
 - 운영 감사 로그
 - 센서 보고 모드와 서버 요청 모드 비교 근거
+- 가장 최근 미해결 요청 1건을 ingest 시점 텔레메트리와 reconcile하는 기준
 
 ### 시간 처리 아키텍처
 
@@ -414,6 +418,12 @@ else:
 - 새 텔레메트리 저장 직후
 - 주기적 재평가 작업 실행 시
 - 필요하다면 상태 API 호출 시 보정 계산 가능
+
+운영 권장값:
+
+- 상태 재평가 scheduler는 `10초` 주기로 실행한다.
+- `health_status`는 `server_received_at` 기준으로 계산한다.
+- `telemetry_status`는 지연 전송, 시계 오차, out-of-order 여부를 분리해 표현한다.
 
 #### 왜 최신 상태 저장소가 필요한가
 

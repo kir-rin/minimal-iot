@@ -98,6 +98,15 @@ function handle_ingest_request(payload, ingest_mode):
     records = normalize_payload_to_records(payload)
     received_at = get_current_server_time()
 
+    if len(records) == 0:
+        return {
+            success: true,
+            ingest_mode: ingest_mode,
+            accepted_count: 0,
+            rejected_count: 0,
+            errors: []
+        }
+
     if ingest_mode == "atomic":
         return process_batch_atomic(records, received_at)
     else:
@@ -106,7 +115,7 @@ function handle_ingest_request(payload, ingest_mode):
 
 #### 최상위 payload 검증
 
-TODO: 빈 배열을 허용할지 미리 결정하는 것이 좋음
+TODO: ✅ 반영 - 최상위 payload가 빈 배열(`[]`)인 경우는 허용하며, 저장 없이 no-op success로 처리한다
 ```text
 function validate_top_level_payload(payload):
     if payload is malformed JSON:
@@ -163,8 +172,14 @@ function validate_reading(record):
     if record.location.lat is missing or not numeric:
         return failure("location.lat", "유효하지 않은 위도")
 
+    if record.location.lat < -90 or record.location.lat > 90:
+        return failure("location.lat", "위도 범위 초과")
+
     if record.location.lng is missing or not numeric:
         return failure("location.lng", "유효하지 않은 경도")
+
+    if record.location.lng < -180 or record.location.lng > 180:
+        return failure("location.lng", "경도 범위 초과")
 
     if temperature, humidity, pressure, air_quality are not valid numeric types:
         return failure("metrics", "유효하지 않은 측정값 타입")
@@ -257,13 +272,11 @@ function process_batch_atomic(records, received_at):
 
 #### Partial 처리 흐름
 
-NOTE: persistence 실패는 전체 오류로 뭉개짐. 
-그러면 "일부는 이미 저장됨" 상태가 생길 수 있음.
-이미 계약으로 명확히 못박아야 함
-QUESTION: 이거 무슨 말이지? 전체 오류로 뭉개지는데, 어떻게 일부는 이미 저장됨 상태가 생긴다는거지?
+NOTE: ✅ 반영 - partial 모드의 persistence 실패는 전체 request-level error로 뭉뚱그리지 않고, 저장 실패 레코드를 record-level error로 반환한다
+QUESTION: ✅ 결정됨 - partial은 레코드별 독립 저장 계약을 사용하며, 앞에서 저장된 레코드는 유지하고 실패 레코드만 오류로 반환한다
 ```text
 function process_batch_partial(records, received_at):
-    valid_records = []
+    candidate_records = []
     errors = []
 
     for each record with index i in records:
@@ -274,19 +287,25 @@ function process_batch_partial(records, received_at):
             continue
 
         enriched = enrich_record(record, received_at, result.normalized_timestamp)
-        valid_records.append(enriched)
+        candidate_records.append({ index: i, record: enriched })
 
-    if valid_records is not empty:
+    saved_records = []
+
+    for each item in candidate_records:
         try:
-            save_valid_records(valid_records)
-            update_current_sensor_status(valid_records)
+            persisted_record = SensorReadingRepository.insert(item.record)
+            saved_records.append(persisted_record)
         catch persistence_error:
-            return build_request_error("PERSISTENCE_ERROR", "부분 저장 처리 중 오류 발생")
+            errors.append(build_record_error(item.index, "record", "저장 실패"))
+
+    if saved_records is not empty:
+        update_current_sensor_status(saved_records)
+        reconcile_mode_change_requests(saved_records)
 
     return {
         success: true,
         ingest_mode: "partial",
-        accepted_count: len(valid_records),
+        accepted_count: len(saved_records),
         rejected_count: len(errors),
         errors: errors
     }
@@ -302,6 +321,7 @@ atomic:
 
 partial:
     - 유효 레코드는 저장, 실패 레코드는 분리 반환
+    - 저장 단계 실패도 레코드 단위로 응답에 포함
     - 데이터 유실을 줄이는 운영 친화적 정책
     - 응답 구조와 오류 추적이 더 중요해짐
 ```
@@ -318,18 +338,30 @@ function save_valid_records(records):
 
 #### 최신 센서 상태 갱신
 
-TODO: 개선 필요 (늦게 도착한 backfill 데이터가 현재 상태를 되돌릴 수 있음) 
+TODO: ✅ 반영 - 기존 current status보다 더 오래된 `sensor_timestamp`를 가진 backfill/out-of-order 데이터는 current status를 덮어쓰지 않도록 보호한다
 ```text
 function update_current_sensor_status(records):
     grouped = group_records_by_serial_number(records)
 
     for each serial_number in grouped:
         latest_record = get_latest_record_by_sensor_timestamp(grouped[serial_number])
+        current_status = SensorStatusRepository.find_by_serial_number(serial_number)
+
+        if current_status exists and latest_record.sensor_timestamp < current_status.last_sensor_timestamp:
+            telemetry_status = evaluate_telemetry_status(latest_record, current_status)
+            SensorStatusRepository.record_telemetry_observation({
+                serial_number: serial_number,
+                telemetry_status: telemetry_status,
+                observed_reading_id: latest_record.id
+            })
+            continue
+
         health_status = evaluate_sensor_health(
             latest_record.mode,
             latest_record.server_received_at,
             get_current_server_time()
         )
+        telemetry_status = evaluate_telemetry_status(latest_record, current_status)
 
         SensorStatusRepository.upsert({
             serial_number: serial_number,
@@ -337,20 +369,21 @@ function update_current_sensor_status(records):
             last_server_received_at: latest_record.server_received_at,
             last_reported_mode: latest_record.mode,
             health_status: health_status,
+            telemetry_status: telemetry_status,
             health_evaluated_at: get_current_server_time(),
-            last_reading_id: latest_record.id_or_placeholder
+            last_reading_id: latest_record.id
         })
 ```
 
-여기서 `id_or_placeholder`는 실제 DB 저장 후 생성되는 식별자를 어떤 시점에 확보할지에 따라 구현이 달라질 수 있으므로, 아키텍처 단계에서 구체화한다.
+저장 후 생성된 `id`를 기준으로 current status와 mode change reconcile을 연결하므로, partial 모드에서도 repository insert 결과는 persisted record를 반환하는 계약을 사용한다.
 
 ### 조회 API 처리 흐름
 
 #### 요청 파라미터 해석
-TODO: page/limit 기본값과 최대값을 미리 확정하는 것이 좋음
+TODO: ✅ 반영 - `page` 기본값은 `1`, `limit` 기본값은 `50`, 최대값은 `100`으로 확정한다
 
-TODO: query time filter의 timezone 요구사항은 구현 전에 확정하는 것이 좋음
-QUESTION: 언제부터 언제까지 볼 것인지 대한 time filter를 말하는건가?
+TODO: ✅ 반영 - query time filter(`sensor_from`, `sensor_to`, `received_from`, `received_to`)는 timezone-aware ISO8601만 허용한다
+QUESTION: ✅ 결정됨 - 여기서 time filter는 `sensor_from`/`sensor_to`, `received_from`/`received_to`처럼 조회 구간을 지정하는 파라미터를 의미한다
 ```text
 function handle_query_request(request_params):
     filters = build_query_filters(request_params)
@@ -372,12 +405,30 @@ function build_query_filters(request_params):
         filters.mode = request_params.mode
 
     if request_params.sensor_from or request_params.sensor_to exists:
-        filters.sensor_timestamp_range = [request_params.sensor_from, request_params.sensor_to]
+        filters.sensor_timestamp_range = [
+            parse_required_timezone_aware_iso8601(request_params.sensor_from),
+            parse_required_timezone_aware_iso8601(request_params.sensor_to)
+        ]
 
     if request_params.received_from or request_params.received_to exists:
-        filters.server_received_range = [request_params.received_from, request_params.received_to]
+        filters.server_received_range = [
+            parse_required_timezone_aware_iso8601(request_params.received_from),
+            parse_required_timezone_aware_iso8601(request_params.received_to)
+        ]
 
     return filters
+```
+
+```text
+function build_pagination(page, limit):
+    normalized_page = max(to_integer_or_default(page, 1), 1)
+    normalized_limit = min(max(to_integer_or_default(limit, 50), 1), 100)
+
+    return {
+        page: normalized_page,
+        limit: normalized_limit,
+        offset: (normalized_page - 1) * normalized_limit
+    }
 ```
 
 #### 데이터 조회
@@ -392,6 +443,7 @@ function query_readings(filters, pagination):
     apply_server_received_range(query, filters.server_received_range)
 
     order_by_sensor_timestamp_desc(query)
+    order_by_id_desc(query)
     apply_pagination(query, pagination)
 
     rows = query.execute()
@@ -402,19 +454,12 @@ function query_readings(filters, pagination):
 
 #### 응답 매핑
 
-TODO: status 필드명 변경 or /sensors/status에서만 주는 편이 안전 
-(구조상 이 값은 "해당 reading 시점의 상태"가 아니라 "센서의 현재 상태"에 가까움)  
-=> 아하 서버가 읽을 때랑, 클라이언트에서 이 값을 볼 때랑 상태 차이가 있을 수도 있음
-ex. 이 값은 HEALTHY지만 이걸 읽었을 때의 시점은 HEALTHY가 아닐 수도 
+TODO: ✅ 반영 - `GET /readings`에서는 상태 필드를 제거하고, 상태 정보는 `/sensors/status`에서만 제공한다
 ```text
 function build_query_response(result):
     response_items = []
 
-    // TODO: 조회 응답 매핑에서 row마다 status를 개별 조회하면 N+1 문제 생김.
-    // batch fetch나 join 전략을 넣는 게 architecture에 한 줄 더 넣는게 좋음
     for each row in result.rows:
-        latest_status = SensorStatusRepository.find_by_serial_number(row.serial_number)
-
         response_items.append({
             id: row.id,
             serial_number: row.serial_number,
@@ -430,8 +475,7 @@ function build_query_response(result):
             location: {
                 lat: row.latitude,
                 lng: row.longitude
-            },
-            status: latest_status.health_status
+            }
         })
 
     return build_paginated_response(response_items, result.total_count)
@@ -461,11 +505,8 @@ function handle_sensor_status_request(filters):
 
 #### 단일 센서 상태 계산
 
-NOTE: 지연 전송/재전송 패킷이 들어오면 실제 센서 freshness와 어긋날 수 있음.
-server_received_at 기반으로 갈지, sensor_timestamp 기반으로 갈지,
-혹은 둘 다 보되 health는 무엇을 따를지 명시가 필요함
-QUESTION: 지연 전송/재전송 패킷을 대비하기 위해 실제 sensor_timestamp가 아니라, server_received_at으로 보는 거 아닌가?
-위에서 지적한 문제가 실제 문제인지 궁금하네..
+NOTE: ✅ 반영 - `health_status`는 `server_received_at` 기준으로 계산하고, 지연 전송/재전송 품질은 별도 `telemetry_status`로 분리한다
+QUESTION: ✅ 결정됨 - sensor freshness 문제는 `telemetry_status`(`FRESH`, `DELAYED`, `CLOCK_SKEW`, `OUT_OF_ORDER`)로 분리해 표현한다
 ```text
 function evaluate_sensor_health(last_mode, last_server_received_at, now):
     if last_mode == "NORMAL":
@@ -481,6 +522,20 @@ function evaluate_sensor_health(last_mode, last_server_received_at, now):
         return "FAULTY"
 
     return "HEALTHY"
+```
+
+```text
+function evaluate_telemetry_status(latest_record, current_status):
+    if current_status exists and latest_record.sensor_timestamp < current_status.last_sensor_timestamp:
+        return "OUT_OF_ORDER"
+
+    if latest_record.sensor_timestamp > latest_record.server_received_at + 30 seconds:
+        return "CLOCK_SKEW"
+
+    if latest_record.server_received_at - latest_record.sensor_timestamp > 2 minutes:
+        return "DELAYED"
+
+    return "FRESH"
 ```
 
 #### 주기적 상태 재평가
@@ -505,6 +560,7 @@ function refresh_all_sensor_health_statuses(now):
 
 #### 스케줄러 진입점
 
+NOTE: ✅ 반영 - 상태 재평가 scheduler는 `10초` 주기로 실행한다
 ```text
 function SensorHealthEvaluationJob.run():
     now = get_current_server_time()
@@ -537,6 +593,25 @@ function record_mode_change_request(serial_number, target_mode, requested_at):
         requested_at: requested_at,
         request_status: "REQUESTED"
     })
+```
+
+```text
+function reconcile_mode_change_requests(saved_records):
+    records_by_serial = group_records_by_serial_number(saved_records)
+
+    for each serial_number in records_by_serial:
+        latest_record = get_latest_record_by_server_received_at(records_by_serial[serial_number])
+        pending_request = ModeChangeRequestRepository.find_latest_unresolved_by_serial_number(serial_number)
+
+        if pending_request is null:
+            continue
+
+        if latest_record.mode == pending_request.requested_mode:
+            ModeChangeRequestRepository.mark_observed_applied(
+                request_id = pending_request.id,
+                observed_applied_at = latest_record.server_received_at,
+                request_status = "APPLIED"
+            )
 ```
 
 이 흐름은 서버의 요청 의도를 저장하는 책임에 집중하며, 실제 센서가 모드를 바꿨는지는 이후 텔레메트리로 확인한다.
@@ -639,8 +714,7 @@ test_mode_change_request_recorded()
 다음 항목은 pseudocode 단계에서 의도적으로 추상화하고, 이후 architecture 또는 implementation 단계에서 구체화한다.
 
 - 실제 트랜잭션 처리 방식
-- DB generated id를 상태 저장과 어떻게 연결할지
-- pagination 기본값과 최대값
+- telemetry_status의 허용 지연 임계값(예: `2 minutes`, `30 seconds`)을 환경 설정으로 분리할지 여부
 - 인증/인가 방식
 - health status enum에 `UNKNOWN` 외의 중간 상태를 둘지 여부
 - 부분 성공 응답의 HTTP status code 정책

@@ -263,10 +263,10 @@ function process_batch_atomic(records, received_at):
     begin_transaction()
 
     try:
-        save_valid_records(valid_records)
-        update_current_sensor_status(valid_records)
+        persisted_records = save_valid_records(valid_records)
+        update_current_sensor_status(persisted_records)
+        reconcile_mode_change_requests(persisted_records)
         commit_transaction()
-        reconcile_mode_change_requests(valid_records)
     catch persistence_error:
         rollback_transaction()
         return build_request_error("PERSISTENCE_ERROR", "배치 저장 실패")
@@ -313,7 +313,7 @@ function process_batch_partial(records, received_at):
         reconcile_mode_change_requests(saved_records)
 
     return {
-        success: true,
+        success: len(saved_records) >= 1,
         ingest_mode: "partial",
         accepted_count: len(saved_records),
         rejected_count: len(errors),
@@ -342,8 +342,13 @@ partial:
 
 ```text
 function save_valid_records(records):
+    persisted_records = []
+
     for each record in records:
-        SensorReadingRepository.insert(record)
+        persisted = SensorReadingRepository.insert(record)
+        persisted_records.append(persisted)
+
+    return persisted_records
 ```
 
 #### 최신 센서 상태 갱신
@@ -425,17 +430,25 @@ function build_query_filters(request_params):
     if request_params.mode exists:
         filters.mode = request_params.mode
 
-    if request_params.sensor_from or request_params.sensor_to exists:
-        filters.sensor_timestamp_range = [
-            parse_required_timezone_aware_iso8601(request_params.sensor_from),
-            parse_required_timezone_aware_iso8601(request_params.sensor_to)
-        ]
+    if request_params.sensor_from exists:
+        filters.sensor_from = parse_required_timezone_aware_iso8601(request_params.sensor_from)
 
-    if request_params.received_from or request_params.received_to exists:
-        filters.server_received_range = [
-            parse_required_timezone_aware_iso8601(request_params.received_from),
-            parse_required_timezone_aware_iso8601(request_params.received_to)
-        ]
+    if request_params.sensor_to exists:
+        filters.sensor_to = parse_required_timezone_aware_iso8601(request_params.sensor_to)
+
+    if filters.sensor_from exists and filters.sensor_to exists:
+        if filters.sensor_from > filters.sensor_to:
+            raise validation_error("sensor_from은 sensor_to보다 클 수 없음")
+
+    if request_params.received_from exists:
+        filters.received_from = parse_required_timezone_aware_iso8601(request_params.received_from)
+
+    if request_params.received_to exists:
+        filters.received_to = parse_required_timezone_aware_iso8601(request_params.received_to)
+
+    if filters.received_from exists and filters.received_to exists:
+        if filters.received_from > filters.received_to:
+            raise validation_error("received_from은 received_to보다 클 수 없음")
 
     return filters
 ```
@@ -460,8 +473,10 @@ function query_readings(filters, pagination):
 
     apply_serial_number_filter(query, filters.serial_number)
     apply_mode_filter(query, filters.mode)
-    apply_sensor_timestamp_range(query, filters.sensor_timestamp_range)
-    apply_server_received_range(query, filters.server_received_range)
+    apply_sensor_timestamp_from(query, filters.sensor_from)
+    apply_sensor_timestamp_to(query, filters.sensor_to)
+    apply_server_received_from(query, filters.received_from)
+    apply_server_received_to(query, filters.received_to)
 
     order_by_sensor_timestamp_desc(query)
     order_by_id_desc(query)
@@ -505,7 +520,11 @@ function build_query_response(result, pagination):
 
 ```text
 function build_paginated_response(items, total_count, pagination):
-    total_pages = ceil(total_count / pagination.limit)
+    if total_count == 0:
+        total_pages = 0
+    else:
+        total_pages = ceil(total_count / pagination.limit)
+
     return {
         success: true,
         data: items,
@@ -515,7 +534,7 @@ function build_paginated_response(items, total_count, pagination):
             limit: pagination.limit,
             total_pages: total_pages,
             has_next_page: pagination.page < total_pages,
-            has_prev_page: pagination.page > 1
+            has_prev_page: pagination.page > 1 and total_pages > 0
         }
     }
 ```
@@ -614,13 +633,15 @@ function handle_mode_change_request(serial_number, target_mode):
         return build_request_error("INVALID_MODE", "지원하지 않는 target_mode")
 
     requested_at = get_current_server_time()
+    sensor_known = SensorReadingRepository.exists_by_serial_number(serial_number)
     result = record_mode_change_request(serial_number, target_mode, requested_at)
 
     return {
         success: true,
         serial_number: serial_number,
         requested_mode: target_mode,
-        requested_at: requested_at
+        requested_at: requested_at,
+        sensor_known: sensor_known
     }
 ```
 
@@ -649,15 +670,22 @@ function reconcile_mode_change_requests(saved_records):
         if pending_request is null:
             continue
 
-        if latest_record.mode == pending_request.requested_mode:
-            ModeChangeRequestRepository.mark_observed_applied(
-                request_id = pending_request.id,
-                observed_applied_at = latest_record.server_received_at,
-                request_status = "APPLIED"
-            )
+        if latest_record.mode != pending_request.requested_mode:
+            continue
+
+        if latest_record.server_received_at < pending_request.requested_at:
+            continue
+
+        ModeChangeRequestRepository.mark_observed_applied(
+            request_id = pending_request.id,
+            observed_applied_at = latest_record.server_received_at,
+            request_status = "APPLIED"
+        )
 ```
 
 이 흐름은 서버의 요청 의도를 저장하는 책임에 집중하며, 실제 센서가 모드를 바꿨는지는 이후 텔레메트리로 확인한다.
+
+NOTE: ✅ 반영 - mode change request의 applied 판정은 mode 일치만으로 처리하지 않고, 요청 이후 관측된 telemetry만 인정한다
 
 ### 오류 처리 흐름
 
@@ -732,7 +760,9 @@ test_atomic_batch_all_success()
 test_atomic_batch_one_invalid_all_fail()
 test_partial_batch_mixed_success_and_failure()
 test_partial_batch_all_invalid()
+test_partial_batch_all_invalid_returns_success_false()
 test_partial_batch_persistence_failure_returns_record_error()
+test_atomic_batch_returns_persisted_records_with_ids()
 ```
 
 #### 상태 판별 테스트
@@ -756,11 +786,14 @@ test_query_by_serial_number()
 test_query_by_mode()
 test_query_by_sensor_time_range()
 test_query_by_server_received_range()
+test_query_with_only_sensor_from()
+test_query_with_only_sensor_to()
 test_query_stable_pagination_with_same_sensor_timestamp()
 test_sensor_from_greater_than_sensor_to_failure()
 test_received_from_greater_than_received_to_failure()
 test_mode_change_request_recorded()
 test_mode_change_reconcile_only_latest_unresolved_request()
+test_mode_change_not_reconciled_by_pre_request_telemetry()
 ```
 
 ### 구현 시 보류 가능한 세부사항

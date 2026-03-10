@@ -358,6 +358,12 @@ OUT_OF_ORDER 레코드 갱신 정책:
 - `last_server_received_at`: 갱신한다. 서버가 최근에 해당 센서로부터 데이터를 수신했다는 사실을 기록한다.
 - `health_status`: `HEALTHY`로 갱신한다. OUT_OF_ORDER 레코드가 도착했다는 것은 센서가 살아있다는 증거이기 때문이다.
 
+Update Contract:
+
+- `full update contract`: 수신된 레코드의 `sensor_timestamp`가 기존 `last_sensor_timestamp`보다 최신이면, `last_sensor_timestamp`, `last_server_received_at`, `last_reported_mode`, `health_status`, `telemetry_status`, `health_evaluated_at`, `last_reading_id`를 모두 최신 레코드 기준으로 갱신한다.
+- `partial update contract`: 수신된 레코드가 OUT_OF_ORDER이면, `last_sensor_timestamp`, `last_reported_mode`, `last_reading_id`는 유지하고, `last_server_received_at`, `health_status`, `telemetry_status`, `health_evaluated_at`만 갱신한다.
+- 이 계약의 목적은 "최신 상태 의미론 유지"와 "센서가 아직 살아있다는 운영 신호 반영"을 동시에 만족하는 것이다.
+
 #### 3. Mode Change Request Store
 
 목적:
@@ -378,6 +384,26 @@ OUT_OF_ORDER 레코드 갱신 정책:
 - 운영 감사 로그
 - 센서 보고 모드와 서버 요청 모드 비교 근거
 - 가장 최근 미해결 요청 1건을 ingest 시점 텔레메트리와 reconcile하는 기준
+
+Reconcile Contract:
+
+- 비교 대상은 센서별 가장 최근 미해결 request 1건이다.
+- 적용 판정 후보 telemetry는 `server_received_at >= requested_at` 조건을 만족해야 한다.
+- candidate telemetry의 reported `mode`가 `requested_mode`와 일치할 때만 request를 `APPLIED`로 전환하고 `observed_applied_at`을 기록한다.
+- 이 갱신은 `Mode Change Request Store`의 상태를 변경하는 작업이며, `Sensor Current Status Store`를 역으로 덮어쓰지 않는다.
+
+### Mode Change Reconcile Guard
+
+TODO: ✅ 반영 - mode change request의 applied 판정은 mode 값 일치만으로 처리하지 않고, 요청 시각 이후에 관측된 telemetry만 인정한다
+
+이 규칙이 필요한 이유는 지연 전송된 과거 telemetry가 현재 요청의 적용 결과처럼 보이는 오탐을 만들 수 있기 때문이다.
+
+적용 원칙:
+
+- reconcile 대상은 센서별 가장 최근 미해결 요청 1건이다.
+- reported `mode == requested_mode`만으로는 충분하지 않다.
+- 관측된 telemetry의 `server_received_at`이 `requested_at` 이후여야만 `APPLIED`로 전이한다.
+- 이를 통해 과거에 생성되었지만 늦게 도착한 telemetry가 현재 요청을 잘못 만족시키는 문제를 방지한다.
 
 ### 시간 처리 아키텍처
 
@@ -433,6 +459,16 @@ else:
 - `health_status`는 `server_received_at` 기준으로 계산한다.
 - `telemetry_status`는 지연 전송, 시계 오차, out-of-order 여부를 분리해 표현한다.
 
+### Pagination Contract
+
+TODO: ✅ 반영 - 조회 결과가 0건인 경우 `total_pages`는 `0`으로 고정한다
+
+응답 일관성을 위해 pagination 메타데이터는 다음 계약을 따른다.
+
+- `total_count == 0`이면 `total_pages = 0`
+- `total_count > 0`이면 `total_pages = ceil(total_count / limit)`
+- 프론트엔드는 이 계약을 기반으로 빈 결과 화면과 페이지네이션 UI를 안정적으로 처리할 수 있다
+
 #### 왜 최신 상태 저장소가 필요한가
 
 - 모든 조회 요청마다 이력 전체를 탐색하면 비효율적이다.
@@ -452,7 +488,7 @@ else:
 
 분산락(Redis 등) 도입 없이 DB row-level lock + SQL 레벨 조건부 upsert로 해결한다. 이 시스템은 "기본적인 웹 서비스 환경"을 전제하므로 별도 인프라 의존성을 추가하지 않는 방향이 적절하다.
 
-`SensorStatusRepository.upsert`는 다음과 같은 SQL 계약을 따른다.
+`SensorStatusRepository.upsert`는 full update contract를 위해 다음과 같은 SQL 계약을 따른다.
 
 ```sql
 INSERT INTO sensor_current_status (...)
@@ -463,13 +499,27 @@ ON CONFLICT (serial_number) DO UPDATE
   WHERE sensor_current_status.last_sensor_timestamp < EXCLUDED.last_sensor_timestamp;
 ```
 
-이 `WHERE` 조건이 SQL 안에 있기 때문에 DB가 원자적으로 처리한다. 동시에 두 배치 요청이 들어오는 경우(예: `[09:00, 09:08]`과 `[09:03, 09:07]`)에도 각 배치가 내부적으로 그룹핑 후 최신 1건만 upsert하며, DB row-level lock이 두 upsert를 직렬화하여 결국 `09:08`이 최종값으로 보장된다.
+OUT_OF_ORDER 레코드를 위한 partial update contract는 별도 update 계약으로 처리한다.
+
+```sql
+UPDATE sensor_current_status
+   SET last_server_received_at = GREATEST(sensor_current_status.last_server_received_at, :incoming_server_received_at),
+       health_status = 'HEALTHY',
+       telemetry_status = :incoming_telemetry_status,
+       health_evaluated_at = :evaluated_at
+ WHERE serial_number = :serial_number
+   AND sensor_current_status.last_sensor_timestamp >= :incoming_sensor_timestamp;
+```
+
+이렇게 full update와 partial update를 분리하면, DB가 원자적으로 최신 상태 의미론을 지키면서도 늦게 도착한 텔레메트리의 "센서가 살아있다"는 신호를 반영할 수 있다. 동시에 두 배치 요청이 들어오는 경우(예: `[09:00, 09:08]`과 `[09:03, 09:07]`)에도 각 배치가 내부적으로 그룹핑 후 최신 1건만 upsert하며, DB row-level lock이 두 upsert를 직렬화하여 결국 `09:08`이 최종값으로 보장된다.
 
 **애플리케이션 레벨 read-compare-write 패턴은 사용하지 않는다.** SELECT 후 애플리케이션에서 비교하고 UPDATE하는 방식은 두 스레드 사이에 다른 쓰기가 끼어드는 경쟁 상태를 방지할 수 없다.
 
 #### HealthEvaluationJob의 멱등성
 
 스케줄러의 `health_status` 갱신은 `health_evaluated_at`과 `health_status`만 업데이트하므로 충돌 가능성이 낮고, 같은 값으로 덮어써도 결과가 동일한 멱등 연산이다. 별도 락 없이 안전하게 실행 가능하다.
+
+운영 의미론상 ingestion 직후 계산된 상태가 가장 최신의 관측 결과다. 따라서 ingestion 경로는 새로운 수신 이벤트를 반영하는 authoritative update를 수행하고, scheduler는 시간이 흐르며 상태가 `FAULTY`로 바뀌는지 보정하는 역할을 맡는다.
 
 ### 컴포넌트 간 상호작용 규칙
 
@@ -498,6 +548,8 @@ ON CONFLICT (serial_number) DO UPDATE
 - 입력 모드를 검증한다.
 - 모드 변경 요청을 기록한다.
 - 실제 적용은 후속 telemetry를 통해 확인한다.
+- 적용 판정은 가장 최근 미해결 요청 1건과, 요청 이후 서버가 관측한 telemetry만 비교한다.
+- 적용 판정 결과는 mode request store를 갱신하며 current status를 역으로 수정하지 않는다.
 
 ### 오류 처리 아키텍처
 
@@ -705,6 +757,14 @@ Reason:
     based on sensor_timestamp characteristics.
     Conflating the two makes it impossible to distinguish "sensor is dead" from
     "sensor is alive but sending stale or out-of-order data".
+
+Decision 7:
+    Use two-path current status update contract for newer vs out-of-order telemetry
+Reason:
+    A single latest-only upsert cannot preserve both latest-state semantics and
+    liveness signals from delayed telemetry. Splitting the update path into full
+    update and partial update keeps current status correct while still reflecting
+    recent server observation of an alive sensor.
 ```
 
 ## Reflection

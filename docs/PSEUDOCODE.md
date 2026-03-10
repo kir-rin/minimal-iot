@@ -181,8 +181,17 @@ function validate_reading(record):
     if record.location.lng < -180 or record.location.lng > 180:
         return failure("location.lng", "경도 범위 초과")
 
-    if temperature, humidity, pressure, air_quality are not valid numeric types:
-        return failure("metrics", "유효하지 않은 측정값 타입")
+    if record.temperature is missing or not numeric:
+        return failure("temperature", "유효하지 않은 temperature 타입")
+
+    if record.humidity is missing or not numeric:
+        return failure("humidity", "유효하지 않은 humidity 타입")
+
+    if record.pressure is missing or not numeric:
+        return failure("pressure", "유효하지 않은 pressure 타입")
+
+    if record.air_quality is missing or not integer:
+        return failure("air_quality", "유효하지 않은 air_quality 타입")
 
     timestamp_result = parse_and_normalize_timestamp(record.timestamp)
     if timestamp_result is failure:
@@ -257,6 +266,7 @@ function process_batch_atomic(records, received_at):
         save_valid_records(valid_records)
         update_current_sensor_status(valid_records)
         commit_transaction()
+        reconcile_mode_change_requests(valid_records)
     catch persistence_error:
         rollback_transaction()
         return build_request_error("PERSISTENCE_ERROR", "배치 저장 실패")
@@ -338,7 +348,7 @@ function save_valid_records(records):
 
 #### 최신 센서 상태 갱신
 
-TODO: ✅ 반영 - 기존 current status보다 더 오래된 `sensor_timestamp`를 가진 backfill/out-of-order 데이터는 current status를 덮어쓰지 않도록 보호한다
+TODO: ✅ 반영 - 기존 current status보다 더 오래된 `sensor_timestamp`를 가진 backfill/out-of-order 데이터는 current status의 시간 및 모드 필드를 덮어쓰지 않도록 보호하되, health_status와 last_server_received_at은 부분 갱신한다
 ```text
 function update_current_sensor_status(records):
     grouped = group_records_by_serial_number(records)
@@ -348,11 +358,16 @@ function update_current_sensor_status(records):
         current_status = SensorStatusRepository.find_by_serial_number(serial_number)
 
         if current_status exists and latest_record.sensor_timestamp < current_status.last_sensor_timestamp:
+            # OUT_OF_ORDER: 시간/모드 필드는 유지하되 부분 갱신만 수행
+            # - last_server_received_at: 서버가 최근에 수신했다는 사실 기록
+            # - health_status: 센서가 살아있다는 증거이므로 HEALTHY로 갱신
             telemetry_status = evaluate_telemetry_status(latest_record, current_status)
-            SensorStatusRepository.record_telemetry_observation({
+            SensorStatusRepository.update_on_out_of_order({
                 serial_number: serial_number,
+                last_server_received_at: latest_record.server_received_at,
+                health_status: "HEALTHY",
                 telemetry_status: telemetry_status,
-                observed_reading_id: latest_record.id
+                health_evaluated_at: get_current_server_time()
             })
             continue
 
@@ -373,6 +388,12 @@ function update_current_sensor_status(records):
             health_evaluated_at: get_current_server_time(),
             last_reading_id: latest_record.id
         })
+        # SQL 레벨 계약:
+        # ON CONFLICT (serial_number) DO UPDATE
+        #   SET last_sensor_timestamp = EXCLUDED.last_sensor_timestamp, ...
+        #   WHERE sensor_current_status.last_sensor_timestamp < EXCLUDED.last_sensor_timestamp
+        # 애플리케이션 레벨 read-compare-write 패턴 금지.
+        # DB row-level lock이 동시 배치 요청 간 경합을 직렬화하여 처리한다.
 ```
 
 저장 후 생성된 `id`를 기준으로 current status와 mode change reconcile을 연결하므로, partial 모드에서도 repository insert 결과는 persisted record를 반환하는 계약을 사용한다.
@@ -389,7 +410,7 @@ function handle_query_request(request_params):
     filters = build_query_filters(request_params)
     pagination = build_pagination(request_params.page, request_params.limit)
     result = query_readings(filters, pagination)
-    return build_query_response(result)
+    return build_query_response(result, pagination)
 ```
 
 #### 필터 구성
@@ -456,7 +477,7 @@ function query_readings(filters, pagination):
 
 TODO: ✅ 반영 - `GET /readings`에서는 상태 필드를 제거하고, 상태 정보는 `/sensors/status`에서만 제공한다
 ```text
-function build_query_response(result):
+function build_query_response(result, pagination):
     response_items = []
 
     for each row in result.rows:
@@ -464,6 +485,7 @@ function build_query_response(result):
             id: row.id,
             serial_number: row.serial_number,
             timestamp: row.sensor_timestamp,
+            raw_timestamp: row.raw_timestamp,
             server_received_at: row.server_received_at,
             mode: row.mode,
             metrics: {
@@ -478,7 +500,24 @@ function build_query_response(result):
             }
         })
 
-    return build_paginated_response(response_items, result.total_count)
+    return build_paginated_response(response_items, result.total_count, pagination)
+```
+
+```text
+function build_paginated_response(items, total_count, pagination):
+    total_pages = ceil(total_count / pagination.limit)
+    return {
+        success: true,
+        data: items,
+        pagination: {
+            total_count: total_count,
+            current_page: pagination.page,
+            limit: pagination.limit,
+            total_pages: total_pages,
+            has_next_page: pagination.page < total_pages,
+            has_prev_page: pagination.page > 1
+        }
+    }
 ```
 
 ### 센서 상태 API 처리 흐름
@@ -600,7 +639,11 @@ function reconcile_mode_change_requests(saved_records):
     records_by_serial = group_records_by_serial_number(saved_records)
 
     for each serial_number in records_by_serial:
-        latest_record = get_latest_record_by_server_received_at(records_by_serial[serial_number])
+        # sensor_timestamp 기준으로 최신 레코드를 선택한다.
+        # reconcile 목적은 "센서가 실제로 모드를 바꿨는가"를 확인하는 것이므로,
+        # 측정 시점(sensor_timestamp)이 기준이 되어야 한다.
+        # 이 기준을 사용하면 OUT_OF_ORDER 레코드가 자연스럽게 reconcile 대상에서 제외된다.
+        latest_record = get_latest_record_by_sensor_timestamp(records_by_serial[serial_number])
         pending_request = ModeChangeRequestRepository.find_latest_unresolved_by_serial_number(serial_number)
 
         if pending_request is null:
@@ -666,6 +709,7 @@ record-level error:
 ```text
 test_single_object_payload_success()
 test_array_payload_success()
+test_empty_array_payload_noop_success()
 test_invalid_top_level_payload_failure()
 test_invalid_ingest_mode_failure()
 ```
@@ -688,6 +732,7 @@ test_atomic_batch_all_success()
 test_atomic_batch_one_invalid_all_fail()
 test_partial_batch_mixed_success_and_failure()
 test_partial_batch_all_invalid()
+test_partial_batch_persistence_failure_returns_record_error()
 ```
 
 #### 상태 판별 테스트
@@ -697,6 +742,11 @@ test_normal_mode_health_within_threshold()
 test_normal_mode_fault_after_12_minutes()
 test_emergency_mode_health_within_threshold()
 test_emergency_mode_fault_after_30_seconds()
+test_telemetry_status_fresh()
+test_telemetry_status_delayed_over_2_minutes()
+test_telemetry_status_clock_skew_sensor_timestamp_in_future()
+test_telemetry_status_out_of_order_older_than_last_known()
+test_out_of_order_partial_status_update_health_and_received_at_only()
 ```
 
 #### 조회 및 모드 제어 테스트
@@ -706,7 +756,11 @@ test_query_by_serial_number()
 test_query_by_mode()
 test_query_by_sensor_time_range()
 test_query_by_server_received_range()
+test_query_stable_pagination_with_same_sensor_timestamp()
+test_sensor_from_greater_than_sensor_to_failure()
+test_received_from_greater_than_received_to_failure()
 test_mode_change_request_recorded()
+test_mode_change_reconcile_only_latest_unresolved_request()
 ```
 
 ### 구현 시 보류 가능한 세부사항

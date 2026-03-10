@@ -200,7 +200,6 @@ Operator/Frontend
   -> QueryService
   -> FilterBuilder
   -> SensorReadingRepository
-  -> SensorStatusRepository (optional join/read)
   -> Response Mapper
   -> Client
 ```
@@ -326,6 +325,7 @@ Operator/Frontend
 - `sensor_timestamp`
 - `server_received_at`
 - `serial_number + sensor_timestamp`
+- `serial_number + server_received_at` (`received_from`/`received_to` 필터 조회 성능을 위해 필요)
 
 #### 2. Sensor Current Status Store
 
@@ -349,6 +349,14 @@ Operator/Frontend
 - 상태 API의 주 데이터 소스
 - 센서 통신 상태와 텔레메트리 품질 상태를 함께 제공
 - 스케줄러가 갱신 대상으로 활용
+
+OUT_OF_ORDER 레코드 갱신 정책:
+
+수신된 레코드의 `sensor_timestamp`가 `last_sensor_timestamp`보다 과거인 경우(OUT_OF_ORDER), 다음 부분 갱신 정책을 따른다.
+
+- `last_sensor_timestamp`, `last_reported_mode`: 갱신하지 않는다. "최신 알려진 센서 상태"의 의미론을 보존하기 위함이다.
+- `last_server_received_at`: 갱신한다. 서버가 최근에 해당 센서로부터 데이터를 수신했다는 사실을 기록한다.
+- `health_status`: `HEALTHY`로 갱신한다. OUT_OF_ORDER 레코드가 도착했다는 것은 센서가 살아있다는 증거이기 때문이다.
 
 #### 3. Mode Change Request Store
 
@@ -431,6 +439,38 @@ else:
 - 운영 UI는 현재 상태를 빠르게 받아야 한다.
 - 상태 평가 책임을 응답 시점 계산에만 의존하면 일관성이 떨어질 수 있다.
 
+### 동시성 처리 전략
+
+#### 경합 지점
+
+이 시스템에서 동시 쓰기 충돌이 발생할 수 있는 지점은 두 곳이다.
+
+1. **`SensorStatusRepository.upsert`**: IngestionService(새 텔레메트리 수신)와 SensorHealthEvaluationJob(주기적 재평가)이 동시에 같은 `serial_number`의 상태를 업데이트할 수 있다.
+2. **`ModeChangeRequestRepository.mark_observed_applied`**: reconcile 시점에 동시 update 가능성이 있다.
+
+#### 해결 전략: DB 조건부 upsert
+
+분산락(Redis 등) 도입 없이 DB row-level lock + SQL 레벨 조건부 upsert로 해결한다. 이 시스템은 "기본적인 웹 서비스 환경"을 전제하므로 별도 인프라 의존성을 추가하지 않는 방향이 적절하다.
+
+`SensorStatusRepository.upsert`는 다음과 같은 SQL 계약을 따른다.
+
+```sql
+INSERT INTO sensor_current_status (...)
+VALUES (...)
+ON CONFLICT (serial_number) DO UPDATE
+  SET last_sensor_timestamp = EXCLUDED.last_sensor_timestamp,
+      ...
+  WHERE sensor_current_status.last_sensor_timestamp < EXCLUDED.last_sensor_timestamp;
+```
+
+이 `WHERE` 조건이 SQL 안에 있기 때문에 DB가 원자적으로 처리한다. 동시에 두 배치 요청이 들어오는 경우(예: `[09:00, 09:08]`과 `[09:03, 09:07]`)에도 각 배치가 내부적으로 그룹핑 후 최신 1건만 upsert하며, DB row-level lock이 두 upsert를 직렬화하여 결국 `09:08`이 최종값으로 보장된다.
+
+**애플리케이션 레벨 read-compare-write 패턴은 사용하지 않는다.** SELECT 후 애플리케이션에서 비교하고 UPDATE하는 방식은 두 스레드 사이에 다른 쓰기가 끼어드는 경쟁 상태를 방지할 수 없다.
+
+#### HealthEvaluationJob의 멱등성
+
+스케줄러의 `health_status` 갱신은 `health_evaluated_at`과 `health_status`만 업데이트하므로 충돌 가능성이 낮고, 같은 값으로 덮어써도 결과가 동일한 멱등 연산이다. 별도 락 없이 안전하게 실행 가능하다.
+
 ### 컴포넌트 간 상호작용 규칙
 
 #### IngestionService
@@ -444,8 +484,9 @@ else:
 
 - request parameter를 filter 조건으로 변환한다.
 - readings store를 조회한다.
-- 필요 시 current status store의 상태를 결합한다.
 - pagination 메타데이터를 포함해 응답을 조립한다.
+
+`QueryService`는 이력 조회 전용 서비스다. 따라서 `GET /api/v1/readings`는 `Sensor Readings Store`만 조회하며, 센서 상태 정보는 결합하지 않는다. 센서별 최신 상태 조회는 별도 `GET /api/v1/sensors/status`에서만 담당한다.
 
 #### SensorHealthService
 
@@ -517,19 +558,72 @@ Persistence-level Error
 ### 배포 관점 구조
 
 ```text
-[Container]
-  - Backend Application
-  - Scheduler Process (same container or separate process)
+[Container: app]
+  - Backend Application (HTTP API)
+  - Scheduler Process (동일 컨테이너 내 별도 프로세스 또는 백그라운드 태스크)
 
-[Persistent Store]
-  - relational or equivalent persistent storage
+[Container: db]
+  - Relational Database (PostgreSQL 권장)
+```
+
+#### Docker Compose 구조 예시
+
+실제 값은 `.env` 파일로 분리하고, `docker-compose.yml`은 키 구조만 정의한다.
+
+```yaml
+version: "3.9"
+
+services:
+  app:
+    build: .
+    ports:
+      - "${APP_PORT}:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - TZ=UTC
+      - SCHEDULER_INTERVAL_SECONDS=${SCHEDULER_INTERVAL_SECONDS}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:15
+    ports:
+      - "${DB_PORT}:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
+```
+
+`.env` 파일 예시:
+
+```env
+APP_PORT=8000
+DATABASE_URL=postgresql://user:password@db:5432/iot_db
+DB_PORT=5432
+POSTGRES_DB=iot_db
+POSTGRES_USER=user
+POSTGRES_PASSWORD=password
+SCHEDULER_INTERVAL_SECONDS=10
 ```
 
 #### 배포 관점 원칙
 
 - 과제 제출 기준으로는 단일 서비스 이미지 구성이 가장 단순하다.
-- 스케줄러는 동일 프로세스 내부 task, 별도 worker, 또는 별도 컨테이너로 분리 가능하다.
-- 실제 구현 단계에서는 가장 단순한 실행 방법을 우선 선택하는 것이 적절하다.
+- 스케줄러는 동일 프로세스 내 백그라운드 태스크로 실행하는 것을 기본으로 한다. 별도 worker 컨테이너로 분리도 가능하나, 과제 범위에서는 단일 컨테이너가 적합하다.
+- `TZ=UTC`를 명시하여 컨테이너 내부 시계가 일관되게 UTC 기준으로 동작하도록 한다.
+- `SCHEDULER_INTERVAL_SECONDS`는 환경변수로 분리하여 배포 환경에 따라 조정 가능하게 한다.
 
 ### 파일/모듈 구조 제안
 
@@ -602,6 +696,15 @@ Decision 5:
     Use scheduler-based health reevaluation instead of MQ/event-driven monitoring
 Reason:
     Meets assignment constraints with lower complexity
+
+Decision 6:
+    Separate health_status and telemetry_status into distinct fields
+Reason:
+    health_status reflects sensor communication liveness based on server_received_at.
+    telemetry_status reflects data quality (FRESH, DELAYED, CLOCK_SKEW, OUT_OF_ORDER)
+    based on sensor_timestamp characteristics.
+    Conflating the two makes it impossible to distinguish "sensor is dead" from
+    "sensor is alive but sending stale or out-of-order data".
 ```
 
 ## Reflection

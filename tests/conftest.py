@@ -26,7 +26,11 @@ def test_settings() -> Settings:
 
 @pytest.fixture
 def app(test_settings: Settings, fixed_clock: FixedClock):
-    return create_app(settings=test_settings, clock=fixed_clock)
+    return create_app(
+        settings=test_settings,
+        clock=fixed_clock,
+        session_factory=lambda: None,
+    )
 
 
 @pytest.fixture

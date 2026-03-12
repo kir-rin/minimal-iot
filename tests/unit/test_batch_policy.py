@@ -58,7 +58,7 @@ def test_atomic_rejects_entire_batch_when_any_record_fails() -> None:
 
     assert decision.success is False
     assert decision.accepted_count == 0
-    assert decision.rejected_count == 2
+    assert decision.rejected_count == 1  # Only the record with validation error
     assert len(decision.errors) == 1
 
 

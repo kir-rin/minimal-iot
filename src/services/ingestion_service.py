@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from src.domain.batch_policy import summarize_atomic_result, summarize_partial_result
 from src.domain.clock import Clock
 from src.domain.types import (
     BatchDecision,
@@ -58,14 +59,8 @@ class IngestionService:
         
         # 빈 배열 처리
         if len(records) == 0:
-            return BatchDecision(
-                success=True,
-                ingest_mode=ingest_mode,
-                accepted_count=0,
-                rejected_count=0,
-                errors=[],
-                accepted_records=[],
-            )
+            from src.domain.batch_policy import build_noop_batch_decision
+            return build_noop_batch_decision(ingest_mode)
         
         # 2. 각 레코드 검증
         validation_results: list[RecordValidationResult] = []
@@ -83,46 +78,28 @@ class IngestionService:
     
     def _process_atomic(self, results: list[RecordValidationResult]) -> BatchDecision:
         """Atomic 정책 처리 - 전체 성공 또는 전체 실패"""
-        failed_results = [r for r in results if not r.accepted]
+        # batch_policy를 사용하여 결정 먼저 내리기
+        decision = summarize_atomic_result(results)
         
-        if failed_results:
-            # 하나라도 실패하면 전체 실패
-            errors = [r.error for r in failed_results if r.error]
-            return BatchDecision(
-                success=False,
-                ingest_mode=IngestMode.ATOMIC,
-                accepted_count=0,
-                rejected_count=len(failed_results),
-                errors=errors,
-                accepted_records=[],
-            )
+        if not decision.success:
+            # 검증 실패 - 저장하지 않고 바로 반환
+            return decision
         
         # 전체 성공 - 저장
-        accepted_readings = [r.reading for r in results if r.reading]
         server_received_at = self._clock.now()
         
         try:
-            for reading in accepted_readings:
+            for reading in decision.accepted_records:
                 self._save_reading_and_update_status(reading, server_received_at)
             self._session.commit()
         except Exception:
             self._session.rollback()
             raise
         
-        return BatchDecision(
-            success=True,
-            ingest_mode=IngestMode.ATOMIC,
-            accepted_count=len(accepted_readings),
-            rejected_count=0,
-            errors=[],
-            accepted_records=accepted_readings,
-        )
+        return decision
     
     def _process_partial(self, results: list[RecordValidationResult]) -> BatchDecision:
         """Partial 정책 처리 - 일부 성공/일부 실패 허용"""
-        accepted_readings: list[NormalizedReading] = []
-        errors: list[ValidationError] = []
-        
         server_received_at = self._clock.now()
         
         # 성공한 레코드 먼저 저장
@@ -130,29 +107,17 @@ class IngestionService:
             if result.accepted and result.reading:
                 try:
                     self._save_reading_and_update_status(result.reading, server_received_at)
-                    accepted_readings.append(result.reading)
                 except Exception as e:
-                    # 저장 실패 시 record-level error
+                    # 저장 실패 시 record-level error로 마킹
                     if result.error:
                         result.error.reason = f"Storage failed: {str(e)}"
-                        errors.append(result.error)
-            elif result.error:
-                errors.append(result.error)
+                    result.accepted = False
         
         # 커밋 (부분 성공은 롤백하지 않음)
         self._session.commit()
         
-        # 성공 여부: 하나라도 성공했으면 True
-        success = len(accepted_readings) > 0
-        
-        return BatchDecision(
-            success=success,
-            ingest_mode=IngestMode.PARTIAL,
-            accepted_count=len(accepted_readings),
-            rejected_count=len(errors),
-            errors=errors,
-            accepted_records=accepted_readings,
-        )
+        # 저장 후 최종 결과 계산
+        return summarize_partial_result(results)
     
     def _save_reading_and_update_status(
         self,

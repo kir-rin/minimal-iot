@@ -48,7 +48,7 @@ def summarize_atomic_result(results: Sequence[RecordValidationResult]) -> BatchD
             success=False,
             ingest_mode=IngestMode.ATOMIC,
             accepted_count=0,
-            rejected_count=len(results),
+            rejected_count=len(errors),
             errors=errors,
             accepted_records=[],
         )

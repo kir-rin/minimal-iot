@@ -56,9 +56,13 @@ def evaluate_health_status(
 
     threshold_config = thresholds or StatusThresholds()
     elapsed = _as_utc(now) - _as_utc(last_server_received_at)
-    threshold = threshold_config.normal_health if mode == Mode.NORMAL else threshold_config.emergency_health
+    # NORMAL and MAINTENANCE use 12min threshold, EMERGENCY uses 30sec
+    if mode in (Mode.NORMAL, Mode.MAINTENANCE):
+        threshold = threshold_config.normal_health
+    else:
+        threshold = threshold_config.emergency_health
 
-    if elapsed > threshold:
+    if elapsed >= threshold:
         return HealthStatus.FAULTY
 
     return HealthStatus.HEALTHY

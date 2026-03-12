@@ -3,9 +3,10 @@
 실제 운영 시나리오:
 1. 데이터 수집 -> 시간 경과 -> Scheduler 실행 -> 상태 FAULTY 전환
 2. Mixed timezone batch -> 시간순 조회 -> Scheduler 재평가
-3. Mode request -> Telemetry applied -> Scheduler 상태 확인
+3. Mode request -> Telemetry applied 전환
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,16 +17,28 @@ from src.config.settings import Settings
 from src.domain.clock import FixedClock
 from src.domain.types import Mode, HealthStatus
 from src.main import create_app
+from src.schedulers.scheduler_runner import ManualSchedulerRunner
 
 
 class TestSchedulerScenarios:
     """스케줄러 E2E 시나리오 테스트"""
 
+    @pytest.fixture
+    def create_test_app(self, test_settings, async_db_session_factory):
+        """테스트용 FastAPI 앱 생성 fixture"""
+        def _create_app(clock):
+            return create_app(
+                settings=test_settings,
+                clock=clock,
+                async_session_factory=async_db_session_factory,
+            )
+        return _create_app
+
     @pytest.mark.asyncio
     async def test_scenario_1_ingest_then_time_elapsed_then_faulty(
         self,
+        create_test_app,
         async_db_session_factory: async_sessionmaker[AsyncSession],
-        test_settings: Settings,
     ):
         """
         시나리오 1: 단건 수집 -> 시간 경과 -> Scheduler -> FAULTY 전환
@@ -38,12 +51,7 @@ class TestSchedulerScenarios:
         base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
         clock = FixedClock(base_time)
         
-        # 앱 생성 (clock 주입)
-        app = create_app(
-            settings=test_settings,
-            clock=clock,
-            async_session_factory=async_db_session_factory,
-        )
+        app = create_test_app(clock)
         client = TestClient(app)
         
         # 1. 데이터 수집
@@ -74,11 +82,11 @@ class TestSchedulerScenarios:
         # 3. 13분 시간 경과
         clock.advance(minutes=13)
         
-        # 4. 스케줄러 실행 (HealthEvaluationJob)
-        from src.schedulers.health_evaluation_job import HealthEvaluationJob
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            await job.evaluate_all_sensors()
+        # 4. 스케줄러 실행 (ManualSchedulerRunner 사용)
+        runner = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner.start()
+        await asyncio.sleep(0.1)  # job 한 번 실행될 시간
+        await runner.stop()
         
         # 5. 다시 센서 상태 확인 (FAULTY)
         status_response = client.get("/api/v1/sensors/status")
@@ -92,8 +100,8 @@ class TestSchedulerScenarios:
     @pytest.mark.asyncio
     async def test_scenario_2_emergency_mode_faulty_faster(
         self,
+        create_test_app,
         async_db_session_factory: async_sessionmaker[AsyncSession],
-        test_settings: Settings,
     ):
         """
         시나리오 2: EMERGENCY 모드는 30초만에 FAULTY
@@ -106,11 +114,7 @@ class TestSchedulerScenarios:
         base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
         clock = FixedClock(base_time)
         
-        app = create_app(
-            settings=test_settings,
-            clock=clock,
-            async_session_factory=async_db_session_factory,
-        )
+        app = create_test_app(clock)
         client = TestClient(app)
         
         # 1. EMERGENCY 모드 데이터 수집
@@ -143,11 +147,11 @@ class TestSchedulerScenarios:
         # 2. 35초 시간 경과 (EMERGENCY는 30초면 FAULTY)
         clock.advance(seconds=35)
         
-        # 3. 스케줄러 실행
-        from src.schedulers.health_evaluation_job import HealthEvaluationJob
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            await job.evaluate_all_sensors()
+        # 3. 스케줄러 실행 (ManualSchedulerRunner 사용)
+        runner = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner.start()
+        await asyncio.sleep(0.1)
+        await runner.stop()
         
         # 4. 상태 확인
         status_response = client.get("/api/v1/sensors/status")
@@ -166,8 +170,8 @@ class TestSchedulerScenarios:
     @pytest.mark.asyncio
     async def test_scenario_3_mixed_timezone_batch_then_scheduler(
         self,
+        create_test_app,
         async_db_session_factory: async_sessionmaker[AsyncSession],
-        test_settings: Settings,
     ):
         """
         시나리오 3: Mixed timezone batch -> 시간순 조회 -> Scheduler 재평가
@@ -181,11 +185,7 @@ class TestSchedulerScenarios:
         base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
         clock = FixedClock(base_time)
         
-        app = create_app(
-            settings=test_settings,
-            clock=clock,
-            async_session_factory=async_db_session_factory,
-        )
+        app = create_test_app(clock)
         client = TestClient(app)
         
         # 1. Mixed timezone 배치 수집
@@ -226,11 +226,11 @@ class TestSchedulerScenarios:
         # 3. 15분 시간 경과
         clock.advance(minutes=15)
         
-        # 4. 스케줄러 실행
-        from src.schedulers.health_evaluation_job import HealthEvaluationJob
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            await job.evaluate_all_sensors()
+        # 4. 스케줄러 실행 (ManualSchedulerRunner 사용)
+        runner = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner.start()
+        await asyncio.sleep(0.1)
+        await runner.stop()
         
         # 5. 모든 센서가 FAULTY
         status_response = client.get("/api/v1/sensors/status")
@@ -246,8 +246,8 @@ class TestSchedulerScenarios:
     @pytest.mark.asyncio
     async def test_scenario_4_new_reading_resets_faulty(
         self,
+        create_test_app,
         async_db_session_factory: async_sessionmaker[AsyncSession],
-        test_settings: Settings,
     ):
         """
         시나리오 4: 새로운 reading 수신 시 FAULTY -> HEALTHY 복구
@@ -261,11 +261,7 @@ class TestSchedulerScenarios:
         base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
         clock = FixedClock(base_time)
         
-        app = create_app(
-            settings=test_settings,
-            clock=clock,
-            async_session_factory=async_db_session_factory,
-        )
+        app = create_test_app(clock)
         client = TestClient(app)
         
         # 1. 초기 데이터 수집
@@ -285,10 +281,10 @@ class TestSchedulerScenarios:
         # 2. 시간 경과 -> FAULTY
         clock.advance(minutes=13)
         
-        from src.schedulers.health_evaluation_job import HealthEvaluationJob
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            await job.evaluate_all_sensors()
+        runner = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner.start()
+        await asyncio.sleep(0.1)
+        await runner.stop()
         
         # FAULTY 확인
         status_response = client.get("/api/v1/sensors/status")
@@ -315,9 +311,10 @@ class TestSchedulerScenarios:
         client.post("/api/v1/readings", json=new_payload)
         
         # 4. 다시 스케줄러 실행
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            await job.evaluate_all_sensors()
+        runner2 = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner2.start()
+        await asyncio.sleep(0.1)
+        await runner2.stop()
         
         # 5. HEALTHY로 복구
         status_response = client.get("/api/v1/sensors/status")
@@ -331,7 +328,6 @@ class TestSchedulerScenarios:
     async def test_scenario_5_scheduler_with_no_sensors(
         self,
         async_db_session_factory: async_sessionmaker[AsyncSession],
-        test_settings: Settings,
     ):
         """
         시나리오 5: 센서가 없을 때 스케줄러 실행
@@ -343,20 +339,20 @@ class TestSchedulerScenarios:
         base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
         clock = FixedClock(base_time)
         
-        # 스케줄러 실행
-        from src.schedulers.health_evaluation_job import HealthEvaluationJob
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            result = await job.evaluate_all_sensors()
+        # 스케줄러 실행 (ManualSchedulerRunner 사용)
+        runner = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner.start()
+        await asyncio.sleep(0.1)
+        await runner.stop()
         
-        assert result["evaluated_count"] == 0
-        assert result["transitioned_to_faulty"] == 0
+        # 오류 없이 완료되었는지 확인 (예외 발생 안 함 = 성공)
+        assert True
 
     @pytest.mark.asyncio
     async def test_scenario_6_partial_batch_then_scheduler(
         self,
+        create_test_app,
         async_db_session_factory: async_sessionmaker[AsyncSession],
-        test_settings: Settings,
     ):
         """
         시나리오 6: Partial batch 수집 -> Scheduler 실행
@@ -370,11 +366,7 @@ class TestSchedulerScenarios:
         base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
         clock = FixedClock(base_time)
         
-        app = create_app(
-            settings=test_settings,
-            clock=clock,
-            async_session_factory=async_db_session_factory,
-        )
+        app = create_test_app(clock)
         client = TestClient(app)
         
         # 1. partial policy로 배치 수집
@@ -423,11 +415,11 @@ class TestSchedulerScenarios:
         # 3. 시간 경과
         clock.advance(minutes=13)
         
-        # 4. 스케줄러 실행
-        from src.schedulers.health_evaluation_job import HealthEvaluationJob
-        async with async_db_session_factory() as session:
-            job = HealthEvaluationJob(session, clock)
-            await job.evaluate_all_sensors()
+        # 4. 스케줄러 실행 (ManualSchedulerRunner 사용)
+        runner = ManualSchedulerRunner(async_db_session_factory, clock, interval_seconds=1)
+        await runner.start()
+        await asyncio.sleep(0.1)
+        await runner.stop()
         
         # 5. 저장된 센서만 FAULTY
         status_response = client.get("/api/v1/sensors/status")

@@ -7,7 +7,6 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.clock import FixedClock
@@ -16,99 +15,6 @@ from src.models.reading import Reading
 from src.models.sensor_status import SensorCurrentStatus
 from src.schedulers.health_evaluation_job import HealthEvaluationJob
 from src.repositories.sensor_status_repository import SensorStatusRepository
-from src.repositories.reading_repository import ReadingRepository
-
-
-@pytest_asyncio.fixture
-async def setup_sensor_with_reading(async_db_session: AsyncSession) -> tuple[str, int]:
-    """테스트용 센서와 reading 데이터 설정"""
-    reading_repo = ReadingRepository(async_db_session)
-    status_repo = SensorStatusRepository(async_db_session)
-    
-    base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
-    serial_number = "TEST-SENSOR-001"
-    
-    # Reading 생성
-    reading = Reading(
-        serial_number=serial_number,
-        raw_timestamp="2024-05-23T08:30:00+00:00",
-        sensor_timestamp=base_time,
-        server_received_at=base_time,
-        mode=Mode.NORMAL.value,
-        temperature=25.0,
-        humidity=60.0,
-        pressure=1013.0,
-        latitude=37.5665,
-        longitude=126.9780,
-        air_quality=50,
-    )
-    async_db_session.add(reading)
-    await async_db_session.flush()
-    
-    # SensorCurrentStatus 생성 (HEALTHY 상태)
-    status = SensorCurrentStatus(
-        serial_number=serial_number,
-        last_sensor_timestamp=base_time,
-        last_server_received_at=base_time,
-        last_reported_mode=Mode.NORMAL.value,
-        health_status=HealthStatus.HEALTHY.value,
-        telemetry_status="FRESH",
-        health_evaluated_at=base_time,
-        last_reading_id=reading.id,
-    )
-    async_db_session.add(status)
-    await async_db_session.commit()
-    
-    return serial_number, reading.id
-
-
-@pytest_asyncio.fixture
-async def setup_multiple_sensors(async_db_session: AsyncSession) -> list[dict]:
-    """여러 센서 설정: NORMAL, EMERGENCY, MAINTENANCE"""
-    reading_repo = ReadingRepository(async_db_session)
-    status_repo = SensorStatusRepository(async_db_session)
-    
-    base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
-    
-    sensors = [
-        {"serial": "SENSOR-NORMAL", "mode": Mode.NORMAL},
-        {"serial": "SENSOR-EMERGENCY", "mode": Mode.EMERGENCY},
-        {"serial": "SENSOR-MAINTENANCE", "mode": Mode.MAINTENANCE},
-    ]
-    
-    for sensor_data in sensors:
-        # Reading 생성
-        reading = Reading(
-            serial_number=sensor_data["serial"],
-            raw_timestamp="2024-05-23T08:30:00+00:00",
-            sensor_timestamp=base_time,
-            server_received_at=base_time,
-            mode=sensor_data["mode"].value,
-            temperature=25.0,
-            humidity=60.0,
-            pressure=1013.0,
-            latitude=37.5665,
-            longitude=126.9780,
-            air_quality=50,
-        )
-        async_db_session.add(reading)
-        await async_db_session.flush()
-        
-        # SensorCurrentStatus 생성
-        status = SensorCurrentStatus(
-            serial_number=sensor_data["serial"],
-            last_sensor_timestamp=base_time,
-            last_server_received_at=base_time,
-            last_reported_mode=sensor_data["mode"].value,
-            health_status=HealthStatus.HEALTHY.value,
-            telemetry_status="FRESH",
-            health_evaluated_at=base_time,
-            last_reading_id=reading.id,
-        )
-        async_db_session.add(status)
-    
-    await async_db_session.commit()
-    return sensors
 
 
 class TestHealthEvaluationJob:
@@ -254,6 +160,7 @@ class TestHealthEvaluationJob:
         assert "evaluated_count" in result
         assert "transitioned_to_faulty" in result
         assert result["transitioned_to_faulty"] == 3
+        assert "failed_count" in result  # 에러 처리 결과 포함
 
     @pytest.mark.asyncio
     async def test_empty_database_no_error(self, async_db_session: AsyncSession):
@@ -266,6 +173,7 @@ class TestHealthEvaluationJob:
         
         assert result["evaluated_count"] == 0
         assert result["transitioned_to_faulty"] == 0
+        assert result["failed_count"] == 0
 
     @pytest.mark.asyncio
     async def test_sensor_already_faulty_stays_faulty(

@@ -72,3 +72,99 @@ def app(test_settings: Settings, fixed_clock: FixedClock, async_db_session_facto
 @pytest.fixture
 def client(app) -> TestClient:
     return TestClient(app)
+
+
+# Common sensor setup fixtures for reuse across tests
+
+@pytest_asyncio.fixture
+async def setup_sensor_with_reading(async_db_session: AsyncSession) -> tuple[str, int]:
+    """테스트용 센서와 reading 데이터 설정 (Integration/E2E 테스트용)"""
+    from src.models.reading import Reading
+    from src.models.sensor_status import SensorCurrentStatus
+    from src.domain.types import Mode, HealthStatus
+    
+    base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
+    serial_number = "TEST-SENSOR-001"
+    
+    # Reading 생성
+    reading = Reading(
+        serial_number=serial_number,
+        raw_timestamp="2024-05-23T08:30:00+00:00",
+        sensor_timestamp=base_time,
+        server_received_at=base_time,
+        mode=Mode.NORMAL.value,
+        temperature=25.0,
+        humidity=60.0,
+        pressure=1013.0,
+        latitude=37.5665,
+        longitude=126.9780,
+        air_quality=50,
+    )
+    async_db_session.add(reading)
+    await async_db_session.flush()
+    
+    # SensorCurrentStatus 생성 (HEALTHY 상태)
+    status = SensorCurrentStatus(
+        serial_number=serial_number,
+        last_sensor_timestamp=base_time,
+        last_server_received_at=base_time,
+        last_reported_mode=Mode.NORMAL.value,
+        health_status=HealthStatus.HEALTHY.value,
+        telemetry_status="FRESH",
+        health_evaluated_at=base_time,
+        last_reading_id=reading.id,
+    )
+    async_db_session.add(status)
+    await async_db_session.commit()
+    
+    return serial_number, reading.id
+
+
+@pytest_asyncio.fixture
+async def setup_multiple_sensors(async_db_session: AsyncSession) -> list[dict]:
+    """여러 센서 설정: NORMAL, EMERGENCY, MAINTENANCE"""
+    from src.models.reading import Reading
+    from src.models.sensor_status import SensorCurrentStatus
+    from src.domain.types import Mode, HealthStatus
+    
+    base_time = datetime(2024, 5, 23, 8, 30, 0, tzinfo=timezone.utc)
+    
+    sensors = [
+        {"serial": "SENSOR-NORMAL", "mode": Mode.NORMAL},
+        {"serial": "SENSOR-EMERGENCY", "mode": Mode.EMERGENCY},
+        {"serial": "SENSOR-MAINTENANCE", "mode": Mode.MAINTENANCE},
+    ]
+    
+    for sensor_data in sensors:
+        # Reading 생성
+        reading = Reading(
+            serial_number=sensor_data["serial"],
+            raw_timestamp="2024-05-23T08:30:00+00:00",
+            sensor_timestamp=base_time,
+            server_received_at=base_time,
+            mode=sensor_data["mode"].value,
+            temperature=25.0,
+            humidity=60.0,
+            pressure=1013.0,
+            latitude=37.5665,
+            longitude=126.9780,
+            air_quality=50,
+        )
+        async_db_session.add(reading)
+        await async_db_session.flush()
+        
+        # SensorCurrentStatus 생성
+        status = SensorCurrentStatus(
+            serial_number=sensor_data["serial"],
+            last_sensor_timestamp=base_time,
+            last_server_received_at=base_time,
+            last_reported_mode=sensor_data["mode"].value,
+            health_status=HealthStatus.HEALTHY.value,
+            telemetry_status="FRESH",
+            health_evaluated_at=base_time,
+            last_reading_id=reading.id,
+        )
+        async_db_session.add(status)
+    
+    await async_db_session.commit()
+    return sensors

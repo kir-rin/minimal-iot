@@ -36,6 +36,25 @@ class ThresholdSettings(BaseSettings):
     )
 
 
+class SchedulerSettings(BaseSettings):
+    """Scheduler configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable scheduler",
+    )
+    health_evaluation_interval_seconds: int = Field(
+        default=10,
+        ge=1,
+        description="Health evaluation job interval in seconds",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="SCHEDULER_",
+        extra="ignore",
+    )
+
+
 class Settings(BaseSettings):
     app_name: str = "IoT Environment Monitoring API"
     app_env: Literal["development", "test", "production"] = "development"
@@ -47,6 +66,9 @@ class Settings(BaseSettings):
 
     # Threshold settings
     thresholds: ThresholdSettings = Field(default_factory=ThresholdSettings)
+
+    # Scheduler settings
+    scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",

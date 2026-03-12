@@ -27,7 +27,6 @@ class ModeRequestRepository:
             serial_number=serial_number,
             requested_mode=requested_mode,
             requested_at=requested_at,
-            request_status="PENDING",
         )
         self._session.add(request)
         await self._session.flush()
@@ -41,44 +40,6 @@ class ModeRequestRepository:
             .where(ModeChangeRequest.id == request_id)
         )
         return result.scalar_one_or_none()
-
-    async def get_pending_requests_by_serial(
-        self,
-        serial_number: str,
-    ) -> list[ModeChangeRequest]:
-        """특정 센서의 PENDING 상태 요청 목록 조회 (최신순)"""
-        result = await self._session.execute(
-            select(ModeChangeRequest)
-            .where(ModeChangeRequest.serial_number == serial_number)
-            .where(ModeChangeRequest.request_status == "PENDING")
-            .order_by(desc(ModeChangeRequest.requested_at))
-        )
-        return list(result.scalars().all())
-
-    async def get_latest_pending_request(
-        self,
-        serial_number: str,
-    ) -> Optional[ModeChangeRequest]:
-        """특정 센서의 가장 최근 PENDING 요청 조회"""
-        result = await self._session.execute(
-            select(ModeChangeRequest)
-            .where(ModeChangeRequest.serial_number == serial_number)
-            .where(ModeChangeRequest.request_status == "PENDING")
-            .order_by(desc(ModeChangeRequest.requested_at))
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
-
-    async def mark_as_applied(
-        self,
-        request: ModeChangeRequest,
-        observed_applied_at: datetime,
-    ) -> ModeChangeRequest:
-        """요청을 APPLIED 상태로 변경"""
-        request.request_status = "APPLIED"
-        request.observed_applied_at = observed_applied_at
-        await self._session.flush()
-        return request
 
     async def get_all_by_serial_number(
         self,

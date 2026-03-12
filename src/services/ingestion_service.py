@@ -160,11 +160,4 @@ class IngestionService:
             is_out_of_order=is_out_of_order,
         )
 
-        # 7. 모드 변경 reconcile
-        await self._mode_service.reconcile_mode_change(
-            serial_number=reading.serial_number,
-            reported_mode=reading.mode,
-            server_received_at=server_received_at,
-        )
-
         return db_reading

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import Integer, String, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,8 +17,6 @@ class ModeChangeRequest(Base):
     serial_number: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     requested_mode: Mapped[str] = mapped_column(String(50), nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    request_status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
-    observed_applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     
     def __repr__(self) -> str:

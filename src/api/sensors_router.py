@@ -89,7 +89,7 @@ async def request_mode_change(
     
     - 센서가 알려진 센서이면 sensor_known: true
     - 센서를 처음 보는 경우에도 sensor_known: false로 요청은 저장됨
-    - 실제 적용 여부는 후속 telemetry로 reconcile됨
+    - 실제 적용 여부는 센서가 보낸 텔레메트리의 mode 필드를 통해 확인
     """
     try:
         # Mode Enum 변환
@@ -103,7 +103,6 @@ async def request_mode_change(
             sensor_known=result.sensor_known,
             requested_mode=result.requested_mode,
             requested_at=result.requested_at,
-            request_status=result.request_status,
             message=result.message,
         )
     except ValueError as e:

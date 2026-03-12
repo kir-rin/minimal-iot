@@ -159,7 +159,6 @@ class TestModeChangeRequest:
         
         # 요청 정보 확인
         assert "requested_at" in data
-        assert data["request_status"] == "PENDING"
 
 
 class TestModeChangeResponseStructure:
@@ -198,4 +197,3 @@ class TestModeChangeResponseStructure:
         assert "sensor_known" in data
         assert "requested_mode" in data
         assert "requested_at" in data
-        assert "request_status" in data

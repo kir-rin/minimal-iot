@@ -21,16 +21,7 @@ class ModeChangeResult:
     sensor_known: bool
     requested_mode: str
     requested_at: datetime
-    request_status: str
     message: str
-
-
-@dataclass
-class ReconcileResult:
-    """Reconcile 결과"""
-    reconciled: bool
-    request_id: Optional[int] = None
-    message: str = ""
 
 
 class ModeService:
@@ -81,61 +72,7 @@ class ModeService:
             sensor_known=sensor_known,
             requested_mode=mode.value,
             requested_at=request.requested_at,
-            request_status=request.request_status,
             message="Mode change request created" if sensor_known else "Sensor not found, but request recorded",
-        )
-
-    async def reconcile_mode_change(
-        self,
-        serial_number: str,
-        reported_mode: Mode,
-        server_received_at: datetime,
-    ) -> ReconcileResult:
-        """텔레메트리 수신 시 모드 변경 reconcile
-        
-        Args:
-            serial_number: 센서 시리얼 번호
-            reported_mode: 센서가 보고한 모드
-            server_received_at: 서버 수신 시각
-            
-        Returns:
-            ReconcileResult: reconcile 결과
-        """
-        # 가장 최근 PENDING 요청 조회
-        pending_request = await self._mode_request_repo.get_latest_pending_request(serial_number)
-
-        if pending_request is None:
-            return ReconcileResult(
-                reconciled=False,
-                message="No pending mode change request found",
-            )
-
-        # reconcile 조건 검사: server_received_at >= requested_at
-        if server_received_at < pending_request.requested_at:
-            return ReconcileResult(
-                reconciled=False,
-                request_id=pending_request.id,
-                message="Telemetry received before request was made",
-            )
-
-        # 모드 일치 여부 확인
-        if reported_mode.value != pending_request.requested_mode:
-            return ReconcileResult(
-                reconciled=False,
-                request_id=pending_request.id,
-                message=f"Mode mismatch: expected {pending_request.requested_mode}, got {reported_mode.value}",
-            )
-
-        # reconcile 성공: 요청을 APPLIED 상태로 변경
-        await self._mode_request_repo.mark_as_applied(
-            request=pending_request,
-            observed_applied_at=server_received_at,
-        )
-
-        return ReconcileResult(
-            reconciled=True,
-            request_id=pending_request.id,
-            message="Mode change request marked as applied",
         )
 
     async def validate_mode(self, mode_value: str) -> Mode:

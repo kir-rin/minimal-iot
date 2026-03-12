@@ -265,7 +265,6 @@ function process_batch_atomic(records, received_at):
     try:
         persisted_records = save_valid_records(valid_records)
         update_current_sensor_status(persisted_records)
-        reconcile_mode_change_requests(persisted_records)
         commit_transaction()
     catch persistence_error:
         rollback_transaction()
@@ -310,7 +309,6 @@ function process_batch_partial(records, received_at):
 
     if saved_records is not empty:
         update_current_sensor_status(saved_records)
-        reconcile_mode_change_requests(saved_records)
 
     return {
         success: len(saved_records) >= 1,
@@ -401,7 +399,7 @@ function update_current_sensor_status(records):
         # DB row-level lock이 동시 배치 요청 간 경합을 직렬화하여 처리한다.
 ```
 
-저장 후 생성된 `id`를 기준으로 current status와 mode change reconcile을 연결하므로, partial 모드에서도 repository insert 결과는 persisted record를 반환하는 계약을 사용한다.
+저장 후 생성된 `id`를 기준으로 current status를 갱신하므로, partial 모드에서도 repository insert 결과는 persisted record를 반환하는 계약을 사용한다.
 
 ### 조회 API 처리 흐름
 
@@ -650,42 +648,11 @@ function record_mode_change_request(serial_number, target_mode, requested_at):
     return ModeChangeRequestRepository.insert({
         serial_number: serial_number,
         requested_mode: target_mode,
-        requested_at: requested_at,
-        request_status: "REQUESTED"
+        requested_at: requested_at
     })
 ```
 
-```text
-function reconcile_mode_change_requests(saved_records):
-    records_by_serial = group_records_by_serial_number(saved_records)
-
-    for each serial_number in records_by_serial:
-        # sensor_timestamp 기준으로 최신 레코드를 선택한다.
-        # reconcile 목적은 "센서가 실제로 모드를 바꿨는가"를 확인하는 것이므로,
-        # 측정 시점(sensor_timestamp)이 기준이 되어야 한다.
-        # 이 기준을 사용하면 OUT_OF_ORDER 레코드가 자연스럽게 reconcile 대상에서 제외된다.
-        latest_record = get_latest_record_by_sensor_timestamp(records_by_serial[serial_number])
-        pending_request = ModeChangeRequestRepository.find_latest_unresolved_by_serial_number(serial_number)
-
-        if pending_request is null:
-            continue
-
-        if latest_record.mode != pending_request.requested_mode:
-            continue
-
-        if latest_record.server_received_at < pending_request.requested_at:
-            continue
-
-        ModeChangeRequestRepository.mark_observed_applied(
-            request_id = pending_request.id,
-            observed_applied_at = latest_record.server_received_at,
-            request_status = "APPLIED"
-        )
-```
-
-이 흐름은 서버의 요청 의도를 저장하는 책임에 집중하며, 실제 센서가 모드를 바꿨는지는 이후 텔레메트리로 확인한다.
-
-NOTE: ✅ 반영 - mode change request의 applied 판정은 mode 일치만으로 처리하지 않고, 요청 이후 관측된 telemetry만 인정한다
+이 흐름은 서버의 요청 의도를 저장하는 책임에 집중한다. 실제 적용 여부는 센서가 보낸 텔레메트리의 `mode` 필드를 통해 간접적으로 확인할 수 있다.
 
 ### 오류 처리 흐름
 
@@ -792,8 +759,6 @@ test_query_stable_pagination_with_same_sensor_timestamp()
 test_sensor_from_greater_than_sensor_to_failure()
 test_received_from_greater_than_received_to_failure()
 test_mode_change_request_recorded()
-test_mode_change_reconcile_only_latest_unresolved_request()
-test_mode_change_not_reconciled_by_pre_request_telemetry()
 ```
 
 ### 구현 시 보류 가능한 세부사항

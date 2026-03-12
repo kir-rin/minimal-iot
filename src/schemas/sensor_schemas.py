@@ -36,5 +36,4 @@ class ModeChangeResponse(BaseModel):
     sensor_known: bool = Field(..., description="센서가 알려진 센서인지 여부")
     requested_mode: str = Field(..., description="요청된 모드")
     requested_at: datetime = Field(..., description="요청 시각 (ISO8601)")
-    request_status: str = Field(default="PENDING", description="요청 상태 (PENDING/APPLIED)")
     message: str = Field(default="", description="추가 메시지")

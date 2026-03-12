@@ -81,3 +81,26 @@ class SensorStatusRepository:
             .filter(SensorCurrentStatus.health_status == health_status.value)
             .all()
         )
+    
+    def get_status_with_filters(
+        self,
+        serial_number: Optional[str] = None,
+        health_status: Optional[str] = None,
+    ) -> list[SensorCurrentStatus]:
+        """필터링된 센서 상태 조회
+        
+        Args:
+            serial_number: 특정 시리얼 번호 (optional)
+            health_status: HEALTHY 또는 FAULTY (optional)
+        
+        Returns:
+            필터링된 센서 상태 목록
+        """
+        query = self._session.query(SensorCurrentStatus)
+        
+        if serial_number:
+            query = query.filter(SensorCurrentStatus.serial_number == serial_number)
+        if health_status:
+            query = query.filter(SensorCurrentStatus.health_status == health_status)
+        
+        return query.all()

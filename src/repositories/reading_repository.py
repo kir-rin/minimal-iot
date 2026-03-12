@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.models.reading import Reading
@@ -56,3 +57,50 @@ class ReadingRepository:
             .order_by(Reading.sensor_timestamp.desc(), Reading.id.desc())
             .first()
         )
+    
+    def get_readings_with_filters(
+        self,
+        serial_number: Optional[str] = None,
+        mode: Optional[str] = None,
+        sensor_from: Optional[datetime] = None,
+        sensor_to: Optional[datetime] = None,
+        received_from: Optional[datetime] = None,
+        received_to: Optional[datetime] = None,
+        page: int = 1,
+        limit: int = 50,
+    ) -> tuple[list[Reading], int]:
+        """필터링된 readings 조회 (pagination 지원)
+        
+        Returns:
+            tuple: (readings 리스트, 전체 개수)
+        """
+        query = self._session.query(Reading)
+        
+        # 필터 적용
+        if serial_number:
+            query = query.filter(Reading.serial_number == serial_number)
+        if mode:
+            query = query.filter(Reading.mode == mode)
+        if sensor_from:
+            query = query.filter(Reading.sensor_timestamp >= sensor_from)
+        if sensor_to:
+            query = query.filter(Reading.sensor_timestamp <= sensor_to)
+        if received_from:
+            query = query.filter(Reading.server_received_at >= received_from)
+        if received_to:
+            query = query.filter(Reading.server_received_at <= received_to)
+        
+        # 전체 개수 계산
+        total_count = query.count()
+        
+        # 정렬 및 pagination 적용
+        offset = (page - 1) * limit
+        readings = (
+            query
+            .order_by(Reading.sensor_timestamp.desc(), Reading.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        
+        return readings, total_count

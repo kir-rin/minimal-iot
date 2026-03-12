@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from src.config.database import get_db_session
 from src.repositories.sensor_status_repository import SensorStatusRepository
 from src.schemas.sensor_schemas import SensorStatusResponse, SensorStatusData
+from src.services.query_service import QueryService
 
 
 router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
@@ -19,52 +20,28 @@ router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
 )
 async def get_sensor_status(
     serial_number: str | None = Query(None, description="특정 센서 조회"),
-    health_status: str | None = Query(None, description="건강 상태 필터"),
+    health_status: str | None = Query(None, description="건강 상태 필터 (HEALTHY/FAULTY)"),
     session: Session = Depends(get_db_session),
 ) -> SensorStatusResponse:
-    """센서 상태 조회 API"""
-    repo = SensorStatusRepository(session)
+    """센서 상태 조회 API
     
-    if serial_number:
-        # 특정 센서 조회
-        status = repo.get_by_serial_number(serial_number)
-        if status is None:
-            return SensorStatusResponse(success=True, data=[])
-        
-        data = [
-            SensorStatusData(
-                serial_number=status.serial_number,
-                last_sensor_timestamp=status.last_sensor_timestamp,
-                last_server_received_at=status.last_server_received_at,
-                last_reported_mode=status.last_reported_mode,
-                health_status=status.health_status,
-                telemetry_status=status.telemetry_status,
-                health_evaluated_at=status.health_evaluated_at,
-                last_reading_id=status.last_reading_id,
-            )
-        ]
-    else:
-        # 전체 또는 필터링된 조회
-        statuses = repo.get_all()
-        
-        if health_status:
-            statuses = [s for s in statuses if s.health_status == health_status]
-        
-        data = [
-            SensorStatusData(
-                serial_number=s.serial_number,
-                last_sensor_timestamp=s.last_sensor_timestamp,
-                last_server_received_at=s.last_server_received_at,
-                last_reported_mode=s.last_reported_mode,
-                health_status=s.health_status,
-                telemetry_status=s.telemetry_status,
-                health_evaluated_at=s.health_evaluated_at,
-                last_reading_id=s.last_reading_id,
-            )
-            for s in statuses
-        ]
+    - 프론트엔드가 별도 계산 없이 상태를 표시할 수 있도록 상태 정보 제공
+    - readings API와는 별도로 상태 정보 제공
+    """
+    # health_status 값 검증
+    if health_status is not None and health_status not in ("HEALTHY", "FAULTY"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="health_status must be either 'HEALTHY' or 'FAULTY'",
+        )
     
-    return SensorStatusResponse(success=True, data=data)
+    service = QueryService(session)
+    result = service.query_sensor_status(
+        serial_number=serial_number,
+        health_status=health_status,
+    )
+    
+    return result
 
 
 @router.post(

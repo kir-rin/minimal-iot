@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
@@ -12,8 +13,10 @@ from src.schemas.reading_schemas import (
     ReadingIngestRequest,
     ReadingIngestResponse,
     RecordError,
+    ReadingQueryResponse,
 )
 from src.services.ingestion_service import IngestionService
+from src.services.query_service import QueryService
 
 
 router = APIRouter(prefix="/api/v1/readings", tags=["readings"])
@@ -91,16 +94,85 @@ async def create_readings(
     )
 
 
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    """ISO8601 문자열을 datetime으로 파싱"""
+    if value is None:
+        return None
+    try:
+        # timezone-aware ISO8601 파싱
+        from datetime import timezone
+        if value.endswith('Z'):
+            value = value[:-1] + '+00:00'
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            raise ValueError("Timezone-aware ISO8601 required")
+        return dt
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid ISO8601 datetime format: {value}",
+        )
+
+
+def validate_time_range(from_val: datetime | None, to_val: datetime | None, name: str) -> None:
+    """시간 범위 검증"""
+    if from_val is not None and to_val is not None and from_val > to_val:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{name}_from must be less than or equal to {name}_to",
+        )
+
+
 @router.get(
     "",
+    response_model=ReadingQueryResponse,
     summary="측정 데이터 조회",
     description="저장된 측정 데이터를 필터링하여 조회합니다.",
 )
 async def get_readings(
     serial_number: str | None = Query(None, description="시리얼 번호 필터"),
-    mode: str | None = Query(None, description="모드 필터"),
+    mode: str | None = Query(None, description="모드 필터 (NORMAL/EMERGENCY)"),
+    sensor_from: str | None = Query(None, description="센서 생성 시각 시작 (ISO8601)"),
+    sensor_to: str | None = Query(None, description="센서 생성 시각 종료 (ISO8601)"),
+    received_from: str | None = Query(None, description="서버 수신 시각 시작 (ISO8601)"),
+    received_to: str | None = Query(None, description="서버 수신 시각 종료 (ISO8601)"),
+    page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+    limit: int = Query(50, ge=1, le=100, description="페이지당 항목 수 (최대 100)"),
     session: Session = Depends(get_db_session),
-):
-    """측정 데이터 조회 API (Phase 4에서 구현)"""
-    # TODO: Phase 4에서 구현
-    return {"success": True, "data": [], "pagination": {}}
+) -> ReadingQueryResponse:
+    """측정 데이터 조회 API
+    
+    - 정렬: sensor_timestamp DESC, id DESC (안정 정렬)
+    - total_count == 0이면 total_pages == 0
+    """
+    # 시간 파싱
+    sensor_from_dt = parse_iso_datetime(sensor_from)
+    sensor_to_dt = parse_iso_datetime(sensor_to)
+    received_from_dt = parse_iso_datetime(received_from)
+    received_to_dt = parse_iso_datetime(received_to)
+    
+    # 시간 범위 검증
+    validate_time_range(sensor_from_dt, sensor_to_dt, "sensor")
+    validate_time_range(received_from_dt, received_to_dt, "received")
+    
+    # 모드 값 검증
+    if mode is not None and mode not in ("NORMAL", "EMERGENCY"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="mode must be either 'NORMAL' or 'EMERGENCY'",
+        )
+    
+    # 서비스 호출
+    service = QueryService(session)
+    result = service.query_readings(
+        serial_number=serial_number,
+        mode=mode,
+        sensor_from=sensor_from_dt,
+        sensor_to=sensor_to_dt,
+        received_from=received_from_dt,
+        received_to=received_to_dt,
+        page=page,
+        limit=limit,
+    )
+    
+    return result

@@ -3,27 +3,28 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.sensor_status import SensorCurrentStatus
 from src.domain.types import NormalizedReading, HealthStatus, TelemetryStatus
 
 
 class SensorStatusRepository:
-    """Sensor Current Status 레포지토리"""
-    
-    def __init__(self, session: Session):
+    """Sensor Current Status 레포지토리 (Async)"""
+
+    def __init__(self, session: AsyncSession):
         self._session = session
-    
-    def get_by_serial_number(self, serial_number: str) -> Optional[SensorCurrentStatus]:
+
+    async def get_by_serial_number(self, serial_number: str) -> Optional[SensorCurrentStatus]:
         """시리얼 번호로 조회"""
-        return (
-            self._session.query(SensorCurrentStatus)
-            .filter(SensorCurrentStatus.serial_number == serial_number)
-            .first()
+        result = await self._session.execute(
+            select(SensorCurrentStatus)
+            .where(SensorCurrentStatus.serial_number == serial_number)
         )
-    
-    def upsert(
+        return result.scalar_one_or_none()
+
+    async def upsert(
         self,
         reading: NormalizedReading,
         reading_id: int,
@@ -33,8 +34,8 @@ class SensorStatusRepository:
         is_out_of_order: bool = False,
     ) -> SensorCurrentStatus:
         """센서 상태 생성 또는 갱신"""
-        existing = self.get_by_serial_number(reading.serial_number)
-        
+        existing = await self.get_by_serial_number(reading.serial_number)
+
         if existing is None:
             # 새로 생성
             status = SensorCurrentStatus(
@@ -55,7 +56,7 @@ class SensorStatusRepository:
             existing.health_status = health_status.value
             existing.health_evaluated_at = server_received_at
             existing.last_reading_id = reading_id
-            
+
             # OUT_OF_ORDER이 아닐 때만 last_sensor_timestamp 갱신
             if not is_out_of_order:
                 existing.last_sensor_timestamp = reading.sensor_timestamp
@@ -63,44 +64,46 @@ class SensorStatusRepository:
             else:
                 # OUT_OF_ORDER이면 health_status만 갱신
                 existing.telemetry_status = TelemetryStatus.OUT_OF_ORDER.value
-        
-        self._session.flush()
-        result = existing if existing else self.get_by_serial_number(reading.serial_number)
+
+        await self._session.flush()
+        result = existing if existing else await self.get_by_serial_number(reading.serial_number)
         if result is None:
             raise RuntimeError("Failed to create or update sensor status")
         return result
-    
-    def get_all(self) -> list[SensorCurrentStatus]:
+
+    async def get_all(self) -> list[SensorCurrentStatus]:
         """전체 센서 상태 조회"""
-        return self._session.query(SensorCurrentStatus).all()
-    
-    def get_by_health_status(self, health_status: HealthStatus) -> list[SensorCurrentStatus]:
+        result = await self._session.execute(select(SensorCurrentStatus))
+        return list(result.scalars().all())
+
+    async def get_by_health_status(self, health_status: HealthStatus) -> list[SensorCurrentStatus]:
         """건강 상태로 필터링 조회"""
-        return (
-            self._session.query(SensorCurrentStatus)
-            .filter(SensorCurrentStatus.health_status == health_status.value)
-            .all()
+        result = await self._session.execute(
+            select(SensorCurrentStatus)
+            .where(SensorCurrentStatus.health_status == health_status.value)
         )
-    
-    def get_status_with_filters(
+        return list(result.scalars().all())
+
+    async def get_status_with_filters(
         self,
         serial_number: Optional[str] = None,
         health_status: Optional[str] = None,
     ) -> list[SensorCurrentStatus]:
         """필터링된 센서 상태 조회
-        
+
         Args:
             serial_number: 특정 시리얼 번호 (optional)
             health_status: HEALTHY 또는 FAULTY (optional)
-        
+
         Returns:
             필터링된 센서 상태 목록
         """
-        query = self._session.query(SensorCurrentStatus)
-        
+        stmt = select(SensorCurrentStatus)
+
         if serial_number:
-            query = query.filter(SensorCurrentStatus.serial_number == serial_number)
+            stmt = stmt.where(SensorCurrentStatus.serial_number == serial_number)
         if health_status:
-            query = query.filter(SensorCurrentStatus.health_status == health_status)
-        
-        return query.all()
+            stmt = stmt.where(SensorCurrentStatus.health_status == health_status)
+
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())

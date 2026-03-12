@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config.database import get_db_session
-from src.repositories.sensor_status_repository import SensorStatusRepository
-from src.schemas.sensor_schemas import SensorStatusResponse, SensorStatusData
-from src.services.query_service import QueryService
+from src.config.database import get_async_session
+from src.services.query_service import QueryService, get_query_service
+from src.schemas.sensor_schemas import SensorStatusResponse
 
 
 router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
@@ -21,10 +20,10 @@ router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
 async def get_sensor_status(
     serial_number: str | None = Query(None, description="특정 센서 조회"),
     health_status: str | None = Query(None, description="건강 상태 필터 (HEALTHY/FAULTY)"),
-    session: Session = Depends(get_db_session),
+    session: AsyncSession = Depends(get_async_session),
 ) -> SensorStatusResponse:
     """센서 상태 조회 API
-    
+
     - 프론트엔드가 별도 계산 없이 상태를 표시할 수 있도록 상태 정보 제공
     - readings API와는 별도로 상태 정보 제공
     """
@@ -34,13 +33,13 @@ async def get_sensor_status(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="health_status must be either 'HEALTHY' or 'FAULTY'",
         )
-    
+
     service = QueryService(session)
-    result = service.query_sensor_status(
+    result = await service.query_sensor_status(
         serial_number=serial_number,
         health_status=health_status,
     )
-    
+
     return result
 
 
@@ -52,7 +51,7 @@ async def get_sensor_status(
 async def request_mode_change(
     serial_number: str,
     request: dict,  # Phase 5에서 구현
-    session: Session = Depends(get_db_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """모드 변경 요청 API (Phase 5에서 구현)"""
     # TODO: Phase 5에서 구현

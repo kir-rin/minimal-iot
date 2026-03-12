@@ -3,20 +3,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.reading import Reading
 from src.domain.types import NormalizedReading
 
 
 class ReadingRepository:
-    """Reading 데이터 접근 레포지토리"""
-    
-    def __init__(self, session: Session):
+    """Reading 데이터 접근 레포지토리 (Async)"""
+
+    def __init__(self, session: AsyncSession):
         self._session = session
-    
-    def create(self, reading: NormalizedReading, server_received_at: datetime) -> Reading:
+
+    async def create(self, reading: NormalizedReading, server_received_at: datetime) -> Reading:
         """새로운 reading 저장"""
         db_reading = Reading(
             serial_number=reading.serial_number,
@@ -32,33 +32,37 @@ class ReadingRepository:
             air_quality=reading.air_quality,
         )
         self._session.add(db_reading)
-        self._session.flush()  # ID 할당을 위해 flush
+        await self._session.flush()  # ID 할당을 위해 flush
         return db_reading
-    
-    def get_by_id(self, reading_id: int) -> Optional[Reading]:
+
+    async def get_by_id(self, reading_id: int) -> Optional[Reading]:
         """ID로 조회"""
-        return self._session.query(Reading).filter(Reading.id == reading_id).first()
-    
-    def get_by_serial_number(self, serial_number: str, limit: int = 100) -> list[Reading]:
+        result = await self._session.execute(
+            select(Reading).where(Reading.id == reading_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_serial_number(self, serial_number: str, limit: int = 100) -> list[Reading]:
         """시리얼 번호로 조회"""
-        return (
-            self._session.query(Reading)
-            .filter(Reading.serial_number == serial_number)
+        result = await self._session.execute(
+            select(Reading)
+            .where(Reading.serial_number == serial_number)
             .order_by(Reading.sensor_timestamp.desc(), Reading.id.desc())
             .limit(limit)
-            .all()
         )
-    
-    def get_latest_for_sensor(self, serial_number: str) -> Optional[Reading]:
+        return list(result.scalars().all())
+
+    async def get_latest_for_sensor(self, serial_number: str) -> Optional[Reading]:
         """센서별 최신 reading 조회"""
-        return (
-            self._session.query(Reading)
-            .filter(Reading.serial_number == serial_number)
+        result = await self._session.execute(
+            select(Reading)
+            .where(Reading.serial_number == serial_number)
             .order_by(Reading.sensor_timestamp.desc(), Reading.id.desc())
-            .first()
+            .limit(1)
         )
-    
-    def get_readings_with_filters(
+        return result.scalar_one_or_none()
+
+    async def get_readings_with_filters(
         self,
         serial_number: Optional[str] = None,
         mode: Optional[str] = None,
@@ -70,37 +74,38 @@ class ReadingRepository:
         limit: int = 50,
     ) -> tuple[list[Reading], int]:
         """필터링된 readings 조회 (pagination 지원)
-        
+
         Returns:
             tuple: (readings 리스트, 전체 개수)
         """
-        query = self._session.query(Reading)
-        
+        # 기본 쿼리
+        stmt = select(Reading)
+
         # 필터 적용
         if serial_number:
-            query = query.filter(Reading.serial_number == serial_number)
+            stmt = stmt.where(Reading.serial_number == serial_number)
         if mode:
-            query = query.filter(Reading.mode == mode)
+            stmt = stmt.where(Reading.mode == mode)
         if sensor_from:
-            query = query.filter(Reading.sensor_timestamp >= sensor_from)
+            stmt = stmt.where(Reading.sensor_timestamp >= sensor_from)
         if sensor_to:
-            query = query.filter(Reading.sensor_timestamp <= sensor_to)
+            stmt = stmt.where(Reading.sensor_timestamp <= sensor_to)
         if received_from:
-            query = query.filter(Reading.server_received_at >= received_from)
+            stmt = stmt.where(Reading.server_received_at >= received_from)
         if received_to:
-            query = query.filter(Reading.server_received_at <= received_to)
-        
+            stmt = stmt.where(Reading.server_received_at <= received_to)
+
         # 전체 개수 계산
-        total_count = query.count()
-        
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        count_result = await self._session.execute(count_stmt)
+        total_count = count_result.scalar() or 0
+
         # 정렬 및 pagination 적용
         offset = (page - 1) * limit
-        readings = (
-            query
-            .order_by(Reading.sensor_timestamp.desc(), Reading.id.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
-        
-        return readings, total_count
+        stmt = stmt.order_by(Reading.sensor_timestamp.desc(), Reading.id.desc())
+        stmt = stmt.offset(offset).limit(limit)
+
+        result = await self._session.execute(stmt)
+        readings = result.scalars().all()
+
+        return list(readings), total_count

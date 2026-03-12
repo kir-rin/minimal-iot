@@ -9,6 +9,7 @@ from typing import Any
 class Mode(str, Enum):
     NORMAL = "NORMAL"
     EMERGENCY = "EMERGENCY"
+    MAINTENANCE = "MAINTENANCE"
 
 
 class IngestMode(str, Enum):

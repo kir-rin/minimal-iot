@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.database import get_async_session
+from src.domain.clock import Clock
+from src.domain.types import Mode
+from src.schemas.sensor_schemas import ModeChangeResponse, SensorStatusResponse
+from src.services.mode_service import ModeService
 from src.services.query_service import QueryService, get_query_service
-from src.schemas.sensor_schemas import SensorStatusResponse
 
 
 router = APIRouter(prefix="/api/v1/sensors", tags=["sensors"])
@@ -43,22 +47,68 @@ async def get_sensor_status(
     return result
 
 
+class ModeChangeRequest(BaseModel):
+    """모드 변경 요청 바디"""
+    mode: str
+    
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        """모드 값 검증"""
+        valid_modes = [m.value for m in Mode]
+        if v not in valid_modes:
+            raise ValueError(f"Invalid mode. Must be one of: {valid_modes}")
+        return v
+
+
+def get_clock(request: Request) -> Clock:
+    """Request에서 clock 가져오기"""
+    return request.app.state.clock
+
+
+async def get_mode_service(
+    session: AsyncSession = Depends(get_async_session),
+    clock: Clock = Depends(get_clock),
+) -> ModeService:
+    """ModeService DI factory"""
+    return ModeService(session, clock)
+
+
 @router.post(
     "/{serial_number}/mode",
+    response_model=ModeChangeResponse,
     summary="모드 변경 요청",
     description="특정 센서의 모드 변경을 요청합니다.",
 )
 async def request_mode_change(
     serial_number: str,
-    request: dict,  # Phase 5에서 구현
-    session: AsyncSession = Depends(get_async_session),
+    request: ModeChangeRequest,
+    service: ModeService = Depends(get_mode_service),
 ):
-    """모드 변경 요청 API (Phase 5에서 구현)"""
-    # TODO: Phase 5에서 구현
-    return {
-        "success": True,
-        "serial_number": serial_number,
-        "requested_mode": request.get("target_mode"),
-        "requested_at": "2024-05-23T08:31:00Z",
-        "sensor_known": True,
-    }
+    """모드 변경 요청 API
+    
+    - 센서가 알려진 센서이면 sensor_known: true
+    - 센서를 처음 보는 경우에도 sensor_known: false로 요청은 저장됨
+    - 실제 적용 여부는 후속 telemetry로 reconcile됨
+    """
+    try:
+        # Mode Enum 변환
+        mode = Mode(request.mode)
+        
+        # 모드 변경 요청 처리
+        result = await service.request_mode_change(serial_number, mode)
+        
+        return ModeChangeResponse(
+            success=result.success,
+            sensor_known=result.sensor_known,
+            requested_mode=result.requested_mode,
+            requested_at=result.requested_at,
+            request_status=result.request_status,
+            message=result.message,
+        )
+    except ValueError as e:
+        # 유효하지 않은 모드 값
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
+        )

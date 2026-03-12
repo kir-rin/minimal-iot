@@ -18,8 +18,10 @@ from src.domain.types import (
 from src.domain.status import evaluate_health_status, evaluate_telemetry_status
 from src.domain.validation import validate_reading, validate_top_level_payload
 from src.models.reading import Reading
+from src.repositories.mode_request_repository import ModeRequestRepository
 from src.repositories.reading_repository import ReadingRepository
 from src.repositories.sensor_status_repository import SensorStatusRepository
+from src.services.mode_service import ModeService
 
 
 class IngestionService:
@@ -29,11 +31,13 @@ class IngestionService:
         self,
         session: AsyncSession,
         clock: Clock,
+        mode_service: ModeService | None = None,
     ):
         self._session = session
         self._clock = clock
         self._reading_repo = ReadingRepository(session)
         self._status_repo = SensorStatusRepository(session)
+        self._mode_service = mode_service or ModeService(session, clock)
 
     async def ingest(
         self,
@@ -154,6 +158,13 @@ class IngestionService:
             health_status=health_status,
             telemetry_status=telemetry_status,
             is_out_of_order=is_out_of_order,
+        )
+
+        # 7. 모드 변경 reconcile
+        await self._mode_service.reconcile_mode_change(
+            serial_number=reading.serial_number,
+            reported_mode=reading.mode,
+            server_received_at=server_received_at,
         )
 
         return db_reading

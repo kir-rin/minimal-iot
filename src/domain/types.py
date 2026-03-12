@@ -90,3 +90,4 @@ class BatchDecision:
     rejected_count: int
     errors: list[ValidationError] = field(default_factory=list)
     accepted_records: list[NormalizedReading] = field(default_factory=list)
+    is_request_level_error: bool = False

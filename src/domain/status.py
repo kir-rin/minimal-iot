@@ -116,5 +116,6 @@ def _coerce_mode(last_mode: str | Mode | None) -> Mode | None:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        raise ValueError("datetime must be timezone-aware")
+        # SQLite는 timezone 정보를 저장하지 않으므로 UTC로 가정
+        value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)

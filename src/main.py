@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from src.api import readings_router, sensors_router
 from src.config.settings import Settings, get_settings
 from src.domain.clock import Clock, SystemClock
 
@@ -24,6 +25,9 @@ def create_app(
             resolved_session_factory = None
         else:
             resolved_session_factory = build_session_factory(resolved_settings)
+            if resolved_session_factory is None:
+                # DB 연결 실패 시 None
+                pass
 
     app = FastAPI(title=resolved_settings.app_name, debug=resolved_settings.debug)
     app.state.settings = resolved_settings
@@ -38,6 +42,10 @@ def create_app(
             "environment": app.state.settings.app_env,
             "now": now,
         }
+
+    # 라우터 등록
+    app.include_router(readings_router)
+    app.include_router(sensors_router)
 
     return app
 

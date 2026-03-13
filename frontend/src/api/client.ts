@@ -10,8 +10,10 @@ import type {
   Reading,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true' || true; // MVP: 기본적으로 목업 사용
+// Docker 환경에서는 nginx가 /api를 proxy하므로 상대 경로 사용
+// 개발 환경에서는 localhost:8000 사용 (vite.config.ts에서 proxy 설정)
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true' || false; // 기본적으로 실제 API 사용
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,

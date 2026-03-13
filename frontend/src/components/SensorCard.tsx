@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Activity, Thermometer, Droplets, AlertCircle } from 'lucide-react';
+import { Activity, Thermometer, Droplets, AlertCircle, Gauge, Wind } from 'lucide-react';
 import type { SensorStatus } from '../types';
 import { formatRelativeTime } from '../utils/time';
 import { useChangeMode } from '../hooks/useApi';
@@ -73,7 +73,7 @@ export function SensorCard({ sensor, onClick }: SensorCardProps) {
       </div>
 
       {/* 메트릭 미리보기 */}
-      <div className="flex items-center gap-4 text-sm text-gray-600 mb-4">
+      <div className="grid grid-cols-2 gap-2 text-sm text-gray-600 mb-4">
         <div className="flex items-center gap-1">
           <Thermometer className="w-4 h-4" />
           <span>{sensor.temperature !== undefined ? `${sensor.temperature.toFixed(1)}°C` : '--°C'}</span>
@@ -81,6 +81,14 @@ export function SensorCard({ sensor, onClick }: SensorCardProps) {
         <div className="flex items-center gap-1">
           <Droplets className="w-4 h-4" />
           <span>{sensor.humidity !== undefined ? `${sensor.humidity.toFixed(1)}%` : '--%'}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Gauge className="w-4 h-4" />
+          <span>{sensor.pressure !== undefined ? `${sensor.pressure.toFixed(0)} hPa` : '-- hPa'}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Wind className="w-4 h-4" />
+          <span>{sensor.air_quality !== undefined ? `AQI ${sensor.air_quality.toFixed(0)}` : 'AQI --'}</span>
         </div>
       </div>
 

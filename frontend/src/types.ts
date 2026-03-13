@@ -11,6 +11,8 @@ export interface SensorStatus {
   last_reading_id: number;
   temperature?: number;
   humidity?: number;
+  pressure?: number;
+  air_quality?: number;
 }
 
 export interface SensorStatusResponse {

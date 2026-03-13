@@ -9,6 +9,7 @@ Python 기반 IoT 환경 모니터링 시스템 백엔드
 - [프로젝트 구조](#프로젝트-구조)
 - [UV 설치](#uv-설치-로컬-개발-시)
 - [주요 기술 스택](#주요-기술-스택)
+- [추가로 구현한 것](#추가로-구현한-것)
 - [API Specification](docs/API_SPECIFICATION.md)
 - [Database Schema](docs/DB_SCHEMA.md)
 
@@ -90,6 +91,17 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 **인프라:**
 - Docker & Docker Compose
 - UV (패키지 매니저)
+
+## 추가로 구현한 것
+
+### MQTT 호환성을 위한 Adapter 패턴
+
+현재 HTTP 기반 API를 MQTT와도 호환될 수 있도록 Adapter 패턴을 적용했습니다.
+
+- **Transport Layer**: `src/transports/`에 프로토콜 독립적인 인터페이스와 구현체
+- **HTTP Transport**: 기존 Router에서 Service Layer 호출
+- **향후 확장**: MQTT 브로커 도입 시 `MqttTransport`만 추가 구현하면 됨
+- **상세 문서**: [docs/MQTT_ADAPTER_PLAN.md](docs/MQTT_ADAPTER_PLAN.md) 참조
 
 ---
 

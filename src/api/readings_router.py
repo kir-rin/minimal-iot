@@ -1,3 +1,12 @@
+"""Readings API Router with Transport Layer.
+
+This router uses HttpSensorTransport to delegate business logic while
+keeping HTTP-specific concerns (status codes, JSON serialization) here.
+
+Future MQTT Note:
+MQTT handlers will use the same SensorTransport interface but handle
+responses differently (publishing to MQTT topics instead of HTTP responses).
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -16,9 +25,8 @@ from src.schemas.reading_schemas import (
     RecordError,
     ReadingQueryResponse,
 )
-from src.services.ingestion_service import IngestionService
 from src.services.query_service import QueryService
-
+from src.transports.http_transport import HttpSensorTransport
 
 router = APIRouter(prefix="/api/v1/readings", tags=["readings"])
 
@@ -56,12 +64,12 @@ def validate_time_range(from_val: datetime | None, to_val: datetime | None, name
         )
 
 
-async def get_ingestion_service(
+async def get_http_transport(
     session: AsyncSession = Depends(get_async_session),
     clock: Clock = Depends(get_clock),
-) -> IngestionService:
-    """IngestionService DI factory"""
-    return IngestionService(session, clock)
+) -> HttpSensorTransport:
+    """HTTP Transport DI factory"""
+    return HttpSensorTransport(session, clock)
 
 
 @router.post(
@@ -73,11 +81,19 @@ async def create_readings(
     request: Request,
     payload: Any = Body(...),  # 단일 객체 또는 배열 모두 허용
     ingest_mode: IngestMode = Query(IngestMode.ATOMIC, description="수집 모드: atomic 또는 partial"),
-    service: IngestionService = Depends(get_ingestion_service),
+    transport: HttpSensorTransport = Depends(get_http_transport),
 ):
-    """센서 데이터 수집 API"""
+    """센서 데이터 수집 API.
+    
+    Uses HttpSensorTransport for protocol-independent business logic.
+    HTTP-specific response handling (status codes, JSON) remains here.
+    
+    Future MQTT: MQTT handler will call transport.ingest_data() and
+    publish result to sensors/{sn}/data/result topic instead.
+    """
     try:
-        result = await service.ingest(payload, ingest_mode)
+        # Call transport layer (protocol-independent)
+        result = await transport.ingest_data(payload, ingest_mode.value)
     except Exception as e:
         # 저장 실패 등 예상치 못한 에러
         raise HTTPException(
@@ -85,13 +101,13 @@ async def create_readings(
             detail=f"Ingestion failed: {str(e)}",
         )
 
-    # 응답 코드 결정
+    # HTTP-specific: 응답 코드 결정
     response_status = status.HTTP_201_CREATED
     if not result.success:
         if result.is_request_level_error:
             # 요청 수준 오류는 422
             response_status = status.HTTP_422_UNPROCESSABLE_ENTITY
-        elif result.ingest_mode == IngestMode.ATOMIC:
+        elif result.ingest_mode == IngestMode.ATOMIC.value:
             response_status = status.HTTP_400_BAD_REQUEST
         else:
             # partial: 전체 실패도 200
@@ -99,23 +115,23 @@ async def create_readings(
     elif result.accepted_count == 0 and result.rejected_count == 0:
         # 빈 배열 no-op
         response_status = status.HTTP_200_OK
-    elif result.ingest_mode == IngestMode.PARTIAL and result.rejected_count > 0:
+    elif result.ingest_mode == IngestMode.PARTIAL.value and result.rejected_count > 0:
         # partial: 일부 성공/일부 실패는 200
         response_status = status.HTTP_200_OK
 
-    # 오류 변환
+    # 오류 변환 (HTTP-specific 스키마)
     errors = [
         RecordError(
-            index=e.index if e.index is not None else 0,
-            field=e.field,
-            reason=e.reason,
+            index=e["index"],
+            field=e["field"],
+            reason=e["reason"],
         )
         for e in result.errors
     ]
 
     response_data = ReadingIngestResponse(
         success=result.success,
-        ingest_mode=result.ingest_mode.value,
+        ingest_mode=result.ingest_mode,
         accepted_count=result.accepted_count,
         rejected_count=result.rejected_count,
         errors=errors,
@@ -144,10 +160,13 @@ async def get_readings(
     limit: int = Query(50, ge=1, le=100, description="페이지당 항목 수 (최대 100)"),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """측정 데이터 조회 API
-
+    """측정 데이터 조회 API.
+    
     - 정렬: sensor_timestamp DESC, id DESC (안정 정렬)
     - total_count == 0이면 total_pages == 0
+    
+    Note: This endpoint uses QueryService directly as it's a read-only query
+    that doesn't need transport abstraction (no MQTT equivalent needed).
     """
     # 시간 파싱
     sensor_from_dt = parse_iso_datetime(sensor_from)

@@ -158,6 +158,8 @@ class QueryService:
                 last_reading_id=status["last_reading_id"],
                 temperature=status["temperature"],
                 humidity=status["humidity"],
+                pressure=status["pressure"],
+                air_quality=status["air_quality"],
             )
             for status in statuses
         ]

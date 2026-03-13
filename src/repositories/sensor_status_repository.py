@@ -104,6 +104,8 @@ class SensorStatusRepository:
                 SensorCurrentStatus,
                 Reading.temperature,
                 Reading.humidity,
+                Reading.pressure,
+                Reading.air_quality,
             )
             .join(Reading, SensorCurrentStatus.last_reading_id == Reading.id)
         )
@@ -131,6 +133,8 @@ class SensorStatusRepository:
                 "last_reading_id": status.last_reading_id,
                 "temperature": row[1],
                 "humidity": row[2],
+                "pressure": row[3],
+                "air_quality": row[4],
             }
             status_list.append(status_dict)
         

@@ -21,6 +21,8 @@ class SensorStatusData(BaseModel):
     # Last reading metrics
     temperature: Optional[float] = Field(None, description="마지막 측정 온도 (°C)")
     humidity: Optional[float] = Field(None, description="마지막 측정 습도 (%)")
+    pressure: Optional[float] = Field(None, description="마지막 측정 기압 (hPa)")
+    air_quality: Optional[int] = Field(None, description="마지막 측정 공기질 (AQI)")
 
 
 class SensorStatusResponse(BaseModel):

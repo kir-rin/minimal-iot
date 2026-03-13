@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+@layer components {
+  .sensor-card {
+    @apply bg-white rounded-2xl shadow-sm p-4 mb-3 border border-gray-100 transition-shadow hover:shadow-md;
+  }
+
+  .badge-healthy {
+    @apply bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .badge-faulty {
+    @apply bg-red-100 text-red-700 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .badge-mode-normal {
+    @apply bg-blue-100 text-blue-700 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .badge-mode-emergency {
+    @apply bg-orange-100 text-orange-700 px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .toggle {
+    @apply w-12 h-6 rounded-full bg-gray-300 relative cursor-pointer transition-colors duration-200;
+  }
+
+  .toggle.active {
+    @apply bg-green-500;
+  }
+
+  .toggle-circle {
+    @apply absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform duration-200;
+  }
+
+  .toggle.active .toggle-circle {
+    @apply translate-x-6;
+  }
+}
+
+#root {
+  @apply max-w-md mx-auto min-h-screen bg-gray-50;
+}

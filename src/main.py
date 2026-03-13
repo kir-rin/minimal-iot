@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.api import readings_router, sensors_router
 from src.config.settings import Settings, get_settings
@@ -79,6 +80,16 @@ def create_app(
         debug=resolved_settings.debug,
         lifespan=lifespan,
     )
+    
+    # CORS 설정
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
     app.state.settings = resolved_settings
     app.state.clock = resolved_clock
     app.state.async_session_factory = resolved_session_factory

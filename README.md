@@ -9,6 +9,7 @@ Python 기반 IoT 환경 모니터링 시스템 백엔드
 - [프로젝트 구조](#프로젝트-구조)
 - [UV 설치](#uv-설치-로컬-개발-시)
 - [주요 기술 스택](#주요-기술-스택)
+- [프론트엔드 화면](#프론트엔드-화면)
 - [추가로 구현한 것](#추가로-구현한-것)
 - [API Specification](docs/API_SPECIFICATION.md)
 - [Database Schema](docs/DB_SCHEMA.md)
@@ -91,6 +92,15 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 **인프라:**
 - Docker & Docker Compose
 - UV (패키지 매니저)
+
+## 프론트엔드 화면
+
+### 메인 대시보드
+![메인 대시보드](docs/images/main.png)
+
+| 상세 화면(차트) | 상세 화면(테이블) |
+|:---:|:---:|
+| ![상세 화면(차트)](docs/images/devices.png) | ![상세 화면(테이블)](docs/images/details.png) |
 
 ## 추가로 구현한 것
 

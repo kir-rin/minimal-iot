@@ -18,6 +18,9 @@ class SensorStatusData(BaseModel):
     telemetry_status: str = Field(..., description="텔레메트리 상태 (FRESH/DELAYED/CLOCK_SKEW/OUT_OF_ORDER)")
     health_evaluated_at: Optional[datetime] = Field(None, description="건강 상태 평가 시각")
     last_reading_id: Optional[int] = Field(None, description="마지막 측정값 ID")
+    # Last reading metrics
+    temperature: Optional[float] = Field(None, description="마지막 측정 온도 (°C)")
+    humidity: Optional[float] = Field(None, description="마지막 측정 습도 (%)")
 
 
 class SensorStatusResponse(BaseModel):

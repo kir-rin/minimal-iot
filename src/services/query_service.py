@@ -132,7 +132,7 @@ class QueryService:
         serial_number: Optional[str] = None,
         health_status: Optional[str] = None,
     ) -> SensorStatusResponse:
-        """센서 상태 조회
+        """센서 상태 조회 (metrics 포함)
 
         Args:
             serial_number: 특정 센서 조회
@@ -148,14 +148,16 @@ class QueryService:
 
         data = [
             SensorStatusData(
-                serial_number=status.serial_number,
-                last_sensor_timestamp=status.last_sensor_timestamp,
-                last_server_received_at=status.last_server_received_at,
-                last_reported_mode=status.last_reported_mode,
-                health_status=status.health_status,
-                telemetry_status=status.telemetry_status,
-                health_evaluated_at=status.health_evaluated_at,
-                last_reading_id=status.last_reading_id,
+                serial_number=status["serial_number"],
+                last_sensor_timestamp=status["last_sensor_timestamp"],
+                last_server_received_at=status["last_server_received_at"],
+                last_reported_mode=status["last_reported_mode"],
+                health_status=status["health_status"],
+                telemetry_status=status["telemetry_status"],
+                health_evaluated_at=status["health_evaluated_at"],
+                last_reading_id=status["last_reading_id"],
+                temperature=status["temperature"],
+                humidity=status["humidity"],
             )
             for status in statuses
         ]

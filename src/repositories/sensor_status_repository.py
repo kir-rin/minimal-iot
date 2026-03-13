@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.sensor_status import SensorCurrentStatus
+from src.models.reading import Reading
 from src.domain.types import NormalizedReading, HealthStatus, TelemetryStatus
 
 
@@ -88,17 +89,24 @@ class SensorStatusRepository:
         self,
         serial_number: Optional[str] = None,
         health_status: Optional[str] = None,
-    ) -> list[SensorCurrentStatus]:
-        """필터링된 센서 상태 조회
+    ) -> list[dict[str, Any]]:
+        """필터링된 센서 상태 조회 (metrics 포함)
 
         Args:
             serial_number: 특정 시리얼 번호 (optional)
             health_status: HEALTHY 또는 FAULTY (optional)
 
         Returns:
-            필터링된 센서 상태 목록
+            필터링된 센서 상태 목록 (temperature, humidity 포함)
         """
-        stmt = select(SensorCurrentStatus)
+        stmt = (
+            select(
+                SensorCurrentStatus,
+                Reading.temperature,
+                Reading.humidity,
+            )
+            .join(Reading, SensorCurrentStatus.last_reading_id == Reading.id)
+        )
 
         if serial_number:
             stmt = stmt.where(SensorCurrentStatus.serial_number == serial_number)
@@ -106,4 +114,24 @@ class SensorStatusRepository:
             stmt = stmt.where(SensorCurrentStatus.health_status == health_status)
 
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        rows = result.all()
+        
+        # Convert to dict with metrics
+        status_list = []
+        for row in rows:
+            status = row[0]
+            status_dict = {
+                "serial_number": status.serial_number,
+                "last_sensor_timestamp": status.last_sensor_timestamp,
+                "last_server_received_at": status.last_server_received_at,
+                "last_reported_mode": status.last_reported_mode,
+                "health_status": status.health_status,
+                "telemetry_status": status.telemetry_status,
+                "health_evaluated_at": status.health_evaluated_at,
+                "last_reading_id": status.last_reading_id,
+                "temperature": row[1],
+                "humidity": row[2],
+            }
+            status_list.append(status_dict)
+        
+        return status_list

@@ -9,6 +9,8 @@ export interface SensorStatus {
   telemetry_status: 'FRESH' | 'DELAYED' | 'CLOCK_SKEW' | 'OUT_OF_ORDER';
   health_evaluated_at: string;
   last_reading_id: number;
+  temperature?: number;
+  humidity?: number;
 }
 
 export interface SensorStatusResponse {

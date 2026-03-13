@@ -72,15 +72,15 @@ export function SensorCard({ sensor, onClick }: SensorCardProps) {
         </span>
       </div>
 
-      {/* 메트릭 미리보기 (더미 데이터 - 실제로는 API에서 받아와야 함) */}
+      {/* 메트릭 미리보기 */}
       <div className="flex items-center gap-4 text-sm text-gray-600 mb-4">
         <div className="flex items-center gap-1">
           <Thermometer className="w-4 h-4" />
-          <span>--°C</span>
+          <span>{sensor.temperature !== undefined ? `${sensor.temperature.toFixed(1)}°C` : '--°C'}</span>
         </div>
         <div className="flex items-center gap-1">
           <Droplets className="w-4 h-4" />
-          <span>--%</span>
+          <span>{sensor.humidity !== undefined ? `${sensor.humidity.toFixed(1)}%` : '--%'}</span>
         </div>
       </div>
 

@@ -9,3 +9,12 @@
 
 → 사용자가 확인(OK)하면 그때 구현 시작.
 
+## 📋 프로젝트 환경 정보
+
+### 데이터베이스
+- **PostgreSQL 18** - 최신 stable 버전 사용 중 (2025년 기준)
+  - `postgres:18-alpine` 이미지 사용
+  - PGDATA 경로: `/var/lib/postgresql` (18 버전부터 변경됨 - 기존 `/var/lib/postgresql/data`와 다름)
+  - ⚠️ **주의**: PostgreSQL 18은 실제로 존재하는 최신 버전입니다 (2025년 2월 릴리즈). 16, 17보다 최신임
+  - Docker Hub 공식 이미지: https://hub.docker.com/_/postgres
+

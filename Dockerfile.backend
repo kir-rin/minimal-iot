@@ -20,6 +20,13 @@ RUN pip install aiosqlite
 # Copy source code
 COPY src/ ./src/
 
+# Copy alembic configuration and migrations
+COPY alembic.ini .
+COPY migrations/ ./migrations/
+
+# Copy scripts for database seeding
+COPY scripts/ ./scripts/
+
 # Expose port
 EXPOSE 8000
 
